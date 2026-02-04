@@ -2285,6 +2285,11 @@ namespace nvrhi::validation
         return m_Device->waitForIdle();
     }
 
+    CommandListLifetimeTrackerHandle DeviceWrapper::createCommandListLifetimeTracker(CommandQueue executionQueue)
+    {
+        return m_Device->createCommandListLifetimeTracker(executionQueue);
+    }
+
     void DeviceWrapper::runGarbageCollection()
     {
         m_Device->runGarbageCollection();

@@ -321,6 +321,13 @@ namespace nvrhi::vulkan
         return true;
     }
 
+    CommandListLifetimeTrackerHandle Device::createCommandListLifetimeTracker(CommandQueue executionQueue)
+    {
+		(void)executionQueue;
+        m_Context.error("CommandListLifetimeTracker is not supported by the Vulkan backend.");
+        return nullptr;
+    }
+
     void Device::runGarbageCollection()
     {
         for (auto& m_Queue : m_Queues)

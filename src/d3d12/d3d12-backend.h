@@ -899,16 +899,37 @@ namespace nvrhi::d3d12
     public:
         RefCountPtr<ID3D12CommandQueue> queue;
         RefCountPtr<ID3D12Fence> fence;
-        uint64_t lastSubmittedInstance = 0;
-        uint64_t lastCompletedInstance = 0;
-        std::atomic<uint64_t> recordingInstance = 1;
-        std::deque<std::shared_ptr<class CommandListInstance>> commandListsInFlight;
+        CommandListLifetimeTrackerHandle lifetimeTracker;
 
-        explicit Queue(const Context& context, ID3D12CommandQueue* queue);
+        std::atomic<uint64_t> lastSubmittedInstance = 0;
+        std::atomic<uint64_t> lastCompletedInstance = 0;
+        std::atomic<uint64_t> recordingInstance = 1;
+
+        explicit Queue(const Context& context, ID3D12CommandQueue* queue, CommandListLifetimeTrackerHandle&& lifetimeTracker);
         uint64_t updateLastCompletedInstance();
+        uint64_t Signal();
 
     private:
         const Context& m_Context;
+    };
+
+    class CommandListLifetimeTracker final : public RefCounter<ICommandListLifetimeTracker>
+    {
+    public:
+        CommandListLifetimeTracker(Device* device, const Context& context, DeviceResources& resources, CommandQueue executionQueue);
+
+        // ICommandListTracker implementation
+        virtual void runGarbageCollection() override;
+
+        // D3D12 specific methods
+        void push(std::shared_ptr<class CommandListInstance> commandList);
+
+    private:
+        Device* m_Device;
+        const Context& m_Context;
+        DeviceResources& m_Resources;
+        CommandQueue m_ExecutionQueue;
+        std::deque<std::shared_ptr<class CommandListInstance>> m_CommandListsInFlight;
     };
     
     class InternalCommandList
@@ -1085,6 +1106,7 @@ namespace nvrhi::d3d12
         
         IDevice* m_Device;
         Queue* m_Queue;
+        CommandListLifetimeTrackerHandle m_LifetimeTracker;
         UploadManager m_UploadManager;
         UploadManager m_DxrScratchManager;
         CommandListResourceStateTracker m_StateTracker;
@@ -1238,6 +1260,7 @@ namespace nvrhi::d3d12
         uint64_t executeCommandLists(nvrhi::ICommandList* const* pCommandLists, size_t numCommandLists, CommandQueue executionQueue = CommandQueue::Graphics) override;
         void queueWaitForCommandList(CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance) override;
         bool waitForIdle() override;
+        CommandListLifetimeTrackerHandle createCommandListLifetimeTracker(CommandQueue executionQueue) override;
         void runGarbageCollection() override;
         bool queryFeatureSupport(Feature feature, void* pInfo = nullptr, size_t infoSize = 0) override;
         FormatSupport queryFormatSupport(Format format) override;
@@ -1277,8 +1300,6 @@ namespace nvrhi::d3d12
 
         std::mutex m_Mutex;
 
-        std::vector<ID3D12CommandList*> m_CommandListsToExecute; // used locally in executeCommandLists, member to avoid re-allocations
-        
         bool m_NvapiIsInitialized = false;
         bool m_SinglePassStereoSupported = false;
         bool m_HlslExtensionsSupported = false;

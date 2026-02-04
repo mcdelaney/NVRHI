@@ -72,11 +72,13 @@ namespace nvrhi::d3d12
     {
     }
 
-    Queue::Queue(const Context& context, ID3D12CommandQueue* queue)
+    Queue::Queue(const Context& context, ID3D12CommandQueue* queue, CommandListLifetimeTrackerHandle&& lifetimeTracker)
         : queue(queue)
         , m_Context(context)
+		, lifetimeTracker(std::move(lifetimeTracker))
     {
         assert(queue);
+        assert(this->lifetimeTracker);
         m_Context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
     }
 
@@ -89,6 +91,65 @@ namespace nvrhi::d3d12
         return lastCompletedInstance;
     }
 
+    uint64_t Queue::Signal()
+    {
+        ++lastSubmittedInstance;
+        queue->Signal(fence, lastSubmittedInstance);
+
+        return lastSubmittedInstance;
+    }
+
+    CommandListLifetimeTracker::CommandListLifetimeTracker(Device* device, const Context& context, DeviceResources& resources, CommandQueue executionQueue)
+	    : m_Device(device)
+		, m_Context(context)
+		, m_Resources(resources)
+		, m_ExecutionQueue(executionQueue)
+    {
+    }
+
+    void CommandListLifetimeTracker::runGarbageCollection()
+    {
+        Queue* pQueue = m_Device->getQueue(m_ExecutionQueue);
+        pQueue->updateLastCompletedInstance();
+
+        // Starting from the back of the queue, i.e. oldest submitted command lists,
+        // see if those command lists have finished executing.
+        while (!m_CommandListsInFlight.empty())
+        {
+            std::shared_ptr<CommandListInstance> instance = m_CommandListsInFlight.back();
+
+            if (pQueue->lastCompletedInstance >= instance->submittedInstance)
+            {
+#ifdef NVRHI_WITH_RTXMU
+                if (!instance->rtxmuBuildIds.empty())
+                {
+                    std::lock_guard lockGuard(m_Resources.asListMutex);
+
+                    m_Resources.asBuildsCompleted.insert(m_Resources.asBuildsCompleted.end(),
+                        instance->rtxmuBuildIds.begin(), instance->rtxmuBuildIds.end());
+
+                    instance->rtxmuBuildIds.clear();
+                }
+                if (!instance->rtxmuCompactionIds.empty())
+                {
+                    m_Context.rtxMemUtil->GarbageCollection(instance->rtxmuCompactionIds);
+                    instance->rtxmuCompactionIds.clear();
+                }
+#endif
+                m_CommandListsInFlight.pop_back();
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    void CommandListLifetimeTracker::push(std::shared_ptr<CommandListInstance> commandList)
+    {
+        m_CommandListsInFlight.push_front(std::move(commandList));
+    }
+
     Device::Device(const DeviceDesc& desc)
         : m_Resources(m_Context, desc)
     {
@@ -97,11 +158,11 @@ namespace nvrhi::d3d12
         m_Context.messageCallback = desc.errorCB;
 
         if (desc.pGraphicsCommandQueue)
-            m_Queues[int(CommandQueue::Graphics)] = std::make_unique<Queue>(m_Context, desc.pGraphicsCommandQueue);
+            m_Queues[int(CommandQueue::Graphics)] = std::make_unique<Queue>(m_Context, desc.pGraphicsCommandQueue, createCommandListLifetimeTracker(CommandQueue::Graphics));
         if (desc.pComputeCommandQueue)
-            m_Queues[int(CommandQueue::Compute)] = std::make_unique<Queue>(m_Context, desc.pComputeCommandQueue);
+            m_Queues[int(CommandQueue::Compute)] = std::make_unique<Queue>(m_Context, desc.pComputeCommandQueue, createCommandListLifetimeTracker(CommandQueue::Compute));
         if (desc.pCopyCommandQueue)
-            m_Queues[int(CommandQueue::Copy)] = std::make_unique<Queue>(m_Context, desc.pCopyCommandQueue);
+            m_Queues[int(CommandQueue::Copy)] = std::make_unique<Queue>(m_Context, desc.pCopyCommandQueue, createCommandListLifetimeTracker(CommandQueue::Copy));
 
         m_Resources.depthStencilViewHeap.allocateResources(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, desc.depthStencilViewHeapSize, false);
         m_Resources.renderTargetViewHeap.allocateResources(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.renderTargetViewHeapSize, false);
@@ -181,8 +242,6 @@ namespace nvrhi::d3d12
         }
         
         m_FenceEvent = CreateEvent(nullptr, false, false, nullptr);
-
-        m_CommandListsToExecute.reserve(64);
 
 #if NVRHI_D3D12_WITH_NVAPI
         //We need to use NVAPI to set resource hints for SLI
@@ -336,7 +395,12 @@ namespace nvrhi::d3d12
         }
         return true;
     }
-    
+
+    CommandListLifetimeTrackerHandle Device::createCommandListLifetimeTracker(CommandQueue executionQueue)
+    {
+		return CommandListLifetimeTrackerHandle::Create(new CommandListLifetimeTracker(this, m_Context, m_Resources, executionQueue));
+    }
+
     Object RootSignature::getNativeObject(ObjectType objectType)
     {
         switch (objectType)
@@ -427,22 +491,20 @@ namespace nvrhi::d3d12
     
     uint64_t Device::executeCommandLists(nvrhi::ICommandList* const* pCommandLists, size_t numCommandLists, CommandQueue executionQueue)
     {
-        m_CommandListsToExecute.resize(numCommandLists);
+        std::vector<ID3D12CommandList*> commandListsToExecute(numCommandLists);
         for (size_t i = 0; i < numCommandLists; i++)
         {
-            m_CommandListsToExecute[i] = checked_cast<CommandList*>(pCommandLists[i])->getD3D12CommandList();
+            commandListsToExecute[i] = checked_cast<CommandList*>(pCommandLists[i])->getD3D12CommandList();
         }
 
         Queue* pQueue = getQueue(executionQueue);
 
-        pQueue->queue->ExecuteCommandLists(uint32_t(m_CommandListsToExecute.size()), m_CommandListsToExecute.data());
-        pQueue->lastSubmittedInstance++;
-        pQueue->queue->Signal(pQueue->fence, pQueue->lastSubmittedInstance);
+        pQueue->queue->ExecuteCommandLists(uint32_t(commandListsToExecute.size()), commandListsToExecute.data());
+        (void)pQueue->Signal();
 
         for (size_t i = 0; i < numCommandLists; i++)
         {
-            auto instance = checked_cast<CommandList*>(pCommandLists[i])->executed(pQueue);
-            pQueue->commandListsInFlight.push_front(instance);
+            (void)checked_cast<CommandList*>(pCommandLists[i])->executed(pQueue);
         }
 
         HRESULT hr = m_Context.device->GetDeviceRemovedReason();
@@ -564,39 +626,7 @@ namespace nvrhi::d3d12
             if (!pQueue)
                 continue;
 
-            pQueue->updateLastCompletedInstance();
-
-            // Starting from the back of the queue, i.e. oldest submitted command lists,
-            // see if those command lists have finished executing.
-            while (!pQueue->commandListsInFlight.empty())
-            {
-                std::shared_ptr<CommandListInstance> instance = pQueue->commandListsInFlight.back();
-                
-                if (pQueue->lastCompletedInstance >= instance->submittedInstance)
-                {
-#ifdef NVRHI_WITH_RTXMU
-                    if (!instance->rtxmuBuildIds.empty())
-                    {
-                        std::lock_guard lockGuard(m_Resources.asListMutex);
-
-                        m_Resources.asBuildsCompleted.insert(m_Resources.asBuildsCompleted.end(),
-                            instance->rtxmuBuildIds.begin(), instance->rtxmuBuildIds.end());
-
-                        instance->rtxmuBuildIds.clear();
-                    }
-                    if (!instance->rtxmuCompactionIds.empty())
-                    {
-                        m_Context.rtxMemUtil->GarbageCollection(instance->rtxmuCompactionIds);
-                        instance->rtxmuCompactionIds.clear();
-                    }
-#endif
-                    pQueue->commandListsInFlight.pop_back();
-                }
-                else
-                {
-                    break;
-                }
-            }
+            pQueue->lifetimeTracker->runGarbageCollection();
         }
     }
 

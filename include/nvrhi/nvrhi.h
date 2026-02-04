@@ -3089,6 +3089,7 @@ namespace nvrhi
     };
     
     class IDevice;
+    class ICommandListLifetimeTracker;
 
     struct CommandListParameters
     {
@@ -3109,13 +3110,41 @@ namespace nvrhi
         // COPY and COMPUTE queues have limited subsets of methods available.
         CommandQueue queueType = CommandQueue::Graphics;
 
+        // Optional external lifetime tracker to use for this command list.
+        // If left nullptr, lifetime will be tracked by the device.
+        ICommandListLifetimeTracker* lifetimeTracker = nullptr;
+
         CommandListParameters& setEnableImmediateExecution(bool value) { enableImmediateExecution = value; return *this; }
         CommandListParameters& setUploadChunkSize(size_t value) { uploadChunkSize = value; return *this; }
         CommandListParameters& setScratchChunkSize(size_t value) { scratchChunkSize = value; return *this; }
         CommandListParameters& setScratchMaxMemory(size_t value) { scratchMaxMemory = value; return *this; }
         CommandListParameters& setQueueType(CommandQueue value) { queueType = value; return *this; }
+        CommandListParameters& setLifetimeTracker(ICommandListLifetimeTracker* value) { lifetimeTracker = value; return *this; }
     };
-    
+
+    //////////////////////////////////////////////////////////////////////////
+    // ICommandListLifetimeTracker
+    //////////////////////////////////////////////////////////////////////////
+
+    // Manages the lifetime of command list objects in a way that is scalable for multithreading.
+    // Each thread that submits work to the GPU (calls IDevice::executeCommandList[s]) should own its own command list tracker
+    // for each queue it submits work to.
+    // - DX11: Multithreaded work submission is not supported.
+    // - DX12: A lifetime tracker can be optionally specified when creating a command list. After submitting a command list,
+	//   internal command lists and their referenced resources will be held by the lifetime tracker until work has finished
+	//   execution on the GPU. Execute runGarbageCollection frequently to poll the GPU and release resources when possible.
+    //   If no lifetime tracker is specified, the Device will add the command list to its own internal lifetime trackers.
+    // - Vulkan: Not yet implemented.
+    class ICommandListLifetimeTracker : public IResource
+    {
+    public:
+        // Releases any command lists that have finished executing on the GPU.
+        // This should be called frequently, e.g. once per frame, once per simulation step, etc.
+        virtual void runGarbageCollection() = 0;
+    };
+
+    typedef RefCountPtr<ICommandListLifetimeTracker> CommandListLifetimeTrackerHandle;
+
     //////////////////////////////////////////////////////////////////////////
     // ICommandList
     //////////////////////////////////////////////////////////////////////////
@@ -3704,6 +3733,8 @@ namespace nvrhi
         virtual void queueWaitForCommandList(CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance) = 0;
         // returns true if the wait completes successfully, false if detecting a problem (e.g. device removal)
         virtual bool waitForIdle() = 0;
+
+        virtual CommandListLifetimeTrackerHandle createCommandListLifetimeTracker(CommandQueue executionQueue) = 0;
 
         // Releases the resources that were referenced in the command lists that have finished executing.
         // IMPORTANT: Call this method at least once per frame.
