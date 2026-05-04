@@ -184,7 +184,9 @@ namespace nvrhi::vulkan
         return m_LastSubmittedID;
     }
 
-    void Queue::updateTextureTileMappings(ITexture* _texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings)
+    void Queue::updateTextureTileMappings(
+        ITexture* _texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
+        VkSemaphore signalSemaphore, uint64_t signalValue)
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
@@ -283,6 +285,21 @@ namespace nvrhi::vulkan
             bindSparseInfo.setImageOpaqueBinds(sparseImageOpaqueMemoryBindInfo);
         }
 
+        // Optional timeline semaphore signal so the caller can wait on the
+        // bind from a subsequent submit instead of stalling the host or
+        // doing a device-wide waitForIdle.
+        vk::Semaphore signalSems[1];
+        uint64_t signalValues[1];
+        vk::TimelineSemaphoreSubmitInfo timelineInfo;
+        if (signalSemaphore != VK_NULL_HANDLE)
+        {
+            signalSems[0] = signalSemaphore;
+            signalValues[0] = signalValue;
+            bindSparseInfo.setSignalSemaphores(signalSems);
+            timelineInfo.setSignalSemaphoreValues(signalValues);
+            bindSparseInfo.setPNext(&timelineInfo);
+        }
+
         m_Queue.bindSparse(bindSparseInfo, vk::Fence());
     }
 
@@ -374,6 +391,16 @@ namespace nvrhi::vulkan
         Queue& queue = *m_Queues[uint32_t(executionQueue)];
 
         queue.updateTextureTileMappings(texture, tileMappings, numTileMappings);
+    }
+
+    void Device::updateTextureTileMappingsSignal(
+        ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
+        CommandQueue executionQueue,
+        VkSemaphore signalSemaphore, uint64_t signalValue)
+    {
+        Queue& queue = *m_Queues[uint32_t(executionQueue)];
+
+        queue.updateTextureTileMappings(texture, tileMappings, numTileMappings, signalSemaphore, signalValue);
     }
 
     uint64_t Device::queueGetCompletedInstance(CommandQueue queue)

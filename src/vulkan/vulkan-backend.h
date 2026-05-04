@@ -240,7 +240,9 @@ namespace nvrhi::vulkan
         // submits a command buffer to this queue, returns submissionID
         uint64_t submit(ICommandList* const* ppCmd, size_t numCmd);
 
-        void updateTextureTileMappings(ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings);
+        void updateTextureTileMappings(
+            ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
+            VkSemaphore signalSemaphore = VK_NULL_HANDLE, uint64_t signalValue = 0);
 
         // retire any command buffers that have finished execution from the pending execution list
         void retireCommandBuffers();
@@ -1085,6 +1087,9 @@ namespace nvrhi::vulkan
 
         void getTextureTiling(ITexture* texture, uint32_t* numTiles, PackedMipDesc* desc, TileShape* tileShape, uint32_t* subresourceTilingsNum, SubresourceTiling* subresourceTilings) override;
         void updateTextureTileMappings(ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue = CommandQueue::Graphics) override;
+        void updateTextureTileMappingsSignal(
+            ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
+            CommandQueue executionQueue, VkSemaphore signalSemaphore, uint64_t signalValue) override;
 
         SamplerFeedbackTextureHandle createSamplerFeedbackTexture(ITexture* pairedTexture, const SamplerFeedbackTextureDesc& desc) override;
         SamplerFeedbackTextureHandle createSamplerFeedbackForNativeTexture(ObjectType objectType, Object texture, ITexture* pairedTexture) override;
