@@ -201,6 +201,7 @@ namespace nvrhi::vulkan
 
         // Mip tail info, required for resource offset
         vk::DeviceSize imageMipTailOffset = 0;
+        vk::DeviceSize imageMipTailStride = 0;
 
         std::vector<vk::SparseImageFormatProperties> formatProperties = m_Context.physicalDevice.getSparseImageFormatProperties(imageInfo.format, imageInfo.imageType, imageInfo.samples, imageInfo.usage, imageInfo.tiling);
 		std::vector<vk::SparseImageMemoryRequirements> memoryRequirements = m_Context.device.getImageSparseMemoryRequirements(texture->image);
@@ -215,6 +216,7 @@ namespace nvrhi::vulkan
         if (!memoryRequirements.empty())
         {
 			imageMipTailOffset = memoryRequirements[0].imageMipTailOffset;
+			imageMipTailStride = memoryRequirements[0].imageMipTailStride;
         }
 
         for (size_t i = 0; i < numTileMappings; i++)
@@ -231,7 +233,7 @@ namespace nvrhi::vulkan
                 if (tiledTextureRegion.tilesNum)
                 {
                     sparseMemoryBinds.push_back(vk::SparseMemoryBind()
-                        .setResourceOffset(imageMipTailOffset + tiledTextureCoordinate.arrayLevel * imageMipTailOffset)
+                        .setResourceOffset(imageMipTailOffset + tiledTextureCoordinate.arrayLevel * imageMipTailStride)
                         .setSize(tiledTextureRegion.tilesNum * texture->tileByteSize)
                         .setMemory(deviceMemory)
                         .setMemoryOffset(deviceMemory ? tileMappings[i].byteOffsets[j] : 0));
