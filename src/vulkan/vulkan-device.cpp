@@ -321,13 +321,6 @@ namespace nvrhi::vulkan
         return true;
     }
 
-    CommandListLifetimeTrackerHandle Device::createCommandListLifetimeTracker(CommandQueue executionQueue)
-    {
-		(void)executionQueue;
-        m_Context.error("CommandListLifetimeTracker is not supported by the Vulkan backend.");
-        return nullptr;
-    }
-
     void Device::runGarbageCollection()
     {
         for (auto& m_Queue : m_Queues)
@@ -337,6 +330,40 @@ namespace nvrhi::vulkan
                 m_Queue->retireCommandBuffers();
             }
         }
+    }
+
+    // CommandListLifetimeTracker implementation. The tracker wraps the
+    // queue's existing retire path so callers (typically a worker thread
+    // submitting on a non-default queue) can drive garbage collection on
+    // their own schedule. The Queue's retireCommandBuffers locks the
+    // queue mutex internally, which is the same mutex Queue::submit holds
+    // for its entire body — concurrent submitters from different threads
+    // therefore serialize correctly on the same VkQueue and trackingSemaphore
+    // counter. This is the minimal implementation needed for thread-safe
+    // submission; a future change can move the in-flight list to be
+    // per-tracker for full per-thread parallelism in retire as well.
+    CommandListLifetimeTracker::CommandListLifetimeTracker(
+        Device* device, CommandQueue executionQueue)
+        : m_Device(device)
+        , m_ExecutionQueue(executionQueue)
+    {
+        assert(m_Device);
+    }
+
+    void CommandListLifetimeTracker::runGarbageCollection()
+    {
+        if (!m_Device)
+            return;
+        Queue* queue = m_Device->getQueue(m_ExecutionQueue);
+        if (queue)
+            queue->retireCommandBuffers();
+    }
+
+    CommandListLifetimeTrackerHandle Device::createCommandListLifetimeTracker(
+        CommandQueue executionQueue)
+    {
+        return CommandListLifetimeTrackerHandle::Create(
+            new CommandListLifetimeTracker(this, executionQueue));
     }
 
     bool Device::queryFeatureSupport(Feature feature, void* pInfo, size_t infoSize)

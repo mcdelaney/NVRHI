@@ -258,6 +258,15 @@ namespace nvrhi::vulkan
         bool pollCommandList(uint64_t commandListID);
         bool waitCommandList(uint64_t commandListID, uint64_t timeout);
 
+        // Public access to the queue's mutex so callers (e.g. the lifetime
+        // tracker on a worker thread) can synchronize with submit. All
+        // mutations of in-flight command-buffer lists, wait/signal semaphore
+        // accumulators, and the m_LastSubmittedID counter happen under this
+        // mutex; submit itself locks it for the entire body so that
+        // concurrent submitters from different threads serialize on it
+        // (Vulkan VkQueue requires external synchronization).
+        std::mutex& getMutex() { return m_Mutex; }
+
     private:
         const VulkanContext& m_Context;
 
@@ -278,6 +287,27 @@ namespace nvrhi::vulkan
         // tracks the list of command buffers in flight on this queue
         std::list<TrackedCommandBufferPtr> m_CommandBuffersInFlight;
         std::list<TrackedCommandBufferPtr> m_CommandBuffersPool;
+    };
+
+    // Vulkan implementation of ICommandListLifetimeTracker (declared in
+    // include/nvrhi/nvrhi.h). One tracker per CommandQueue per submitting
+    // thread is the intended usage; for now the tracker delegates
+    // runGarbageCollection to the queue's existing retire path which holds
+    // the queue mutex internally. This is sufficient to make concurrent
+    // submission correct (the immediate goal) — a future change can move
+    // the in-flight list per-tracker for full per-thread parallelism.
+    class CommandListLifetimeTracker final : public RefCounter<ICommandListLifetimeTracker>
+    {
+    public:
+        CommandListLifetimeTracker(class Device* device, CommandQueue executionQueue);
+        ~CommandListLifetimeTracker() override = default;
+
+        // ICommandListLifetimeTracker
+        void runGarbageCollection() override;
+
+    private:
+        class Device* m_Device {nullptr};
+        CommandQueue m_ExecutionQueue {CommandQueue::Graphics};
     };
 
     class MemoryResource

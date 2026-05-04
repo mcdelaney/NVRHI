@@ -105,6 +105,12 @@ namespace nvrhi::vulkan
         if (!semaphore)
             return;
 
+        // Lock so concurrent submitters from different threads don't race
+        // on the wait/signal accumulator vectors. The mutex is the same
+        // one submit() holds for its entire body — addWaitSemaphore and
+        // the subsequent submit are logically a single transaction for
+        // any given submitter.
+        std::lock_guard lockGuard(m_Mutex);
         m_WaitSemaphores.push_back(semaphore);
         m_WaitSemaphoreValues.push_back(value);
     }
@@ -114,12 +120,27 @@ namespace nvrhi::vulkan
         if (!semaphore)
             return;
 
+        std::lock_guard lockGuard(m_Mutex);
         m_SignalSemaphores.push_back(semaphore);
         m_SignalSemaphoreValues.push_back(value);
     }
 
     uint64_t Queue::submit(ICommandList* const* ppCmd, size_t numCmd)
     {
+        // Hold the queue mutex for the entire body. This serves three
+        // purposes:
+        //   1. Serializes vk::Queue.submit calls — Vulkan requires external
+        //      synchronization on a VkQueue; concurrent submits from
+        //      different threads otherwise produce validator THREADING
+        //      ERROR plus undefined behavior.
+        //   2. Protects the wait/signal semaphore accumulator vectors and
+        //      m_LastSubmittedID against concurrent addWait/addSignal/submit.
+        //   3. Guarantees tracking-semaphore signal-value monotonicity:
+        //      without the lock, two submitters could both observe the
+        //      same m_LastSubmittedID and signal the trackingSemaphore at
+        //      duplicate values (validator VUID-VkSubmitInfo-pSignalSemaphores-03242).
+        std::lock_guard lockGuard(m_Mutex);
+
         std::vector<vk::PipelineStageFlags> waitStageArray(m_WaitSemaphores.size());
         std::vector<vk::CommandBuffer> commandBuffers(numCmd);
 
@@ -312,6 +333,14 @@ namespace nvrhi::vulkan
 
     void Queue::retireCommandBuffers()
     {
+        // Lock so concurrent retire calls from different trackers don't
+        // race on m_CommandBuffersInFlight, m_CommandBuffersPool, or
+        // m_LastFinishedID. This is also the same mutex submit() holds,
+        // so a retire and a submit serialize naturally — important
+        // because retire moves entries between the in-flight list and
+        // the pool, and submit appends to the in-flight list.
+        std::lock_guard lockGuard(m_Mutex);
+
         std::list<TrackedCommandBufferPtr> submissions = std::move(m_CommandBuffersInFlight);
 
         uint64_t lastFinishedID = updateLastFinishedID();
