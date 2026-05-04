@@ -244,11 +244,6 @@ namespace nvrhi::vulkan
             ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
             VkSemaphore signalSemaphore = VK_NULL_HANDLE, uint64_t signalValue = 0);
 
-        // retire any command buffers that have finished execution from the pending execution list
-        void retireCommandBuffers();
-
-        TrackedCommandBufferPtr getCommandBufferInFlight(uint64_t submissionID);
-
         uint64_t updateLastFinishedID();
         uint64_t getLastSubmittedID() const { return m_LastSubmittedID; }
         uint64_t getLastFinishedID() const { return m_LastFinishedID; }
@@ -258,14 +253,10 @@ namespace nvrhi::vulkan
         bool pollCommandList(uint64_t commandListID);
         bool waitCommandList(uint64_t commandListID, uint64_t timeout);
 
-        // Public access to the queue's mutex so callers (e.g. the lifetime
-        // tracker on a worker thread) can synchronize with submit. All
-        // mutations of in-flight command-buffer lists, wait/signal semaphore
-        // accumulators, and the m_LastSubmittedID counter happen under this
-        // mutex; submit itself locks it for the entire body so that
-        // concurrent submitters from different threads serialize on it
-        // (Vulkan VkQueue requires external synchronization).
-        std::mutex& getMutex() { return m_Mutex; }
+        // Internal: push a TrackedCommandBuffer onto the queue's command-
+        // buffer pool. Called by CommandListLifetimeTracker after the
+        // command buffer has been observed to have retired on the GPU.
+        void returnCommandBufferToPool(TrackedCommandBufferPtr cb);
 
     private:
         const VulkanContext& m_Context;
@@ -274,40 +265,69 @@ namespace nvrhi::vulkan
         CommandQueue m_QueueID;
         uint32_t m_QueueFamilyIndex = uint32_t(-1);
 
+        // Protects vk::Queue.submit (Vulkan VkQueue external-sync
+        // requirement), the wait/signal accumulator vectors, and the
+        // m_CommandBuffersPool free-list. Concurrent submitters from
+        // different threads serialize on this mutex.
         std::mutex m_Mutex;
         std::vector<vk::Semaphore> m_WaitSemaphores;
         std::vector<uint64_t> m_WaitSemaphoreValues;
         std::vector<vk::Semaphore> m_SignalSemaphores;
         std::vector<uint64_t> m_SignalSemaphoreValues;
 
-        uint64_t m_LastRecordingID = 0;
-        uint64_t m_LastSubmittedID = 0;
-        uint64_t m_LastFinishedID = 0;
+        // Atomic so concurrent threads observing them via the tracking-
+        // semaphore-based completion poll see a consistent view. They are
+        // mutated only under m_Mutex (in submit / updateLastFinishedID),
+        // but read lock-free from runGarbageCollection.
+        std::atomic<uint64_t> m_LastRecordingID {0};
+        std::atomic<uint64_t> m_LastSubmittedID {0};
+        std::atomic<uint64_t> m_LastFinishedID {0};
 
-        // tracks the list of command buffers in flight on this queue
-        std::list<TrackedCommandBufferPtr> m_CommandBuffersInFlight;
+        // Free list of command buffers ready for reuse. Protected by
+        // m_Mutex (allocation in getOrCreateCommandBuffer + return in
+        // returnCommandBufferToPool).
         std::list<TrackedCommandBufferPtr> m_CommandBuffersPool;
+
+    public:
+        // Default lifetime tracker for command lists submitted on this
+        // queue without a per-CL tracker. Created at queue construction;
+        // owns its own in-flight list. This is the per-Queue equivalent of
+        // D3D12 PR #119's `Queue::lifetimeTracker` member.
+        CommandListLifetimeTrackerHandle defaultLifetimeTracker;
     };
 
     // Vulkan implementation of ICommandListLifetimeTracker (declared in
-    // include/nvrhi/nvrhi.h). One tracker per CommandQueue per submitting
-    // thread is the intended usage; for now the tracker delegates
-    // runGarbageCollection to the queue's existing retire path which holds
-    // the queue mutex internally. This is sufficient to make concurrent
-    // submission correct (the immediate goal) — a future change can move
-    // the in-flight list per-tracker for full per-thread parallelism.
+    // include/nvrhi/nvrhi.h). One tracker per submitting thread per queue
+    // is the intended usage. Each tracker owns its OWN in-flight list, so
+    // multiple threads can submit + retire concurrently with no contention
+    // beyond the queue's submit mutex (which Vulkan requires anyway). This
+    // mirrors the D3D12 backend's CommandListLifetimeTracker (PR #119).
     class CommandListLifetimeTracker final : public RefCounter<ICommandListLifetimeTracker>
     {
     public:
-        CommandListLifetimeTracker(class Device* device, CommandQueue executionQueue);
-        ~CommandListLifetimeTracker() override = default;
+        CommandListLifetimeTracker(const VulkanContext& context,
+            class Device* device, CommandQueue executionQueue);
+        ~CommandListLifetimeTracker() override;
 
         // ICommandListLifetimeTracker
         void runGarbageCollection() override;
 
+        // Internal: push an in-flight command buffer onto this tracker.
+        // Called by CommandList::executed after Queue::submit succeeds.
+        void push(TrackedCommandBufferPtr cb);
+
     private:
+        const VulkanContext& m_Context;
         class Device* m_Device {nullptr};
         CommandQueue m_ExecutionQueue {CommandQueue::Graphics};
+
+        // Mutex protects m_CommandBuffersInFlight only. The per-tracker
+        // mutex is the key to per-thread retire parallelism: a worker
+        // thread's tracker contends only with itself (own pushes from its
+        // own submits, own retires from its own runGarbageCollection),
+        // never with the render thread's separate tracker.
+        std::mutex m_Mutex;
+        std::list<TrackedCommandBufferPtr> m_CommandBuffersInFlight;
     };
 
     class MemoryResource
@@ -1360,6 +1380,13 @@ namespace nvrhi::vulkan
 
         std::unique_ptr<UploadManager> m_UploadManager;
         std::unique_ptr<UploadManager> m_ScratchManager;
+
+        // Optional per-CL lifetime tracker (from CommandListParameters::
+        // lifetimeTracker). When set, Queue::submit pushes the CL's tracked
+        // command buffer into this tracker instead of the queue's default
+        // tracker, enabling per-thread retire parallelism. Mirrors D3D12
+        // backend's CommandList::m_LifetimeTracker (PR #119).
+        CommandListLifetimeTrackerHandle m_LifetimeTracker;
         
         void clearTexture(ITexture* texture, TextureSubresourceSet subresources, const vk::ClearColorValue& clearValue);
 

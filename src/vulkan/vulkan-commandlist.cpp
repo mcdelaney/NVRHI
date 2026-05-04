@@ -21,6 +21,7 @@
 */
 
 #include "vulkan-backend.h"
+#include "nvrhi/common/misc.h"
 
 namespace nvrhi::vulkan
 {
@@ -32,6 +33,7 @@ namespace nvrhi::vulkan
         , m_StateTracker(context.messageCallback)
         , m_UploadManager(std::make_unique<UploadManager>(device, parameters.uploadChunkSize, 0, false))
         , m_ScratchManager(std::make_unique<UploadManager>(device, parameters.scratchChunkSize, parameters.scratchMaxMemory, true))
+        , m_LifetimeTracker(parameters.lifetimeTracker)
     {
 #if NVRHI_WITH_AFTERMATH
         if (m_Device->isAftermathEnabled())
@@ -127,6 +129,19 @@ namespace nvrhi::vulkan
 
         const CommandQueue queueID = queue.getQueueID();
         const uint64_t recordingID = m_CurrentCmdBuf->recordingID;
+
+        // Hand the in-flight command buffer to the lifetime tracker. If the
+        // CL was created with a per-instance tracker, push to it; otherwise
+        // fall back to the queue's default tracker. Per-thread parallelism
+        // works because each tracker owns its own m_CommandBuffersInFlight
+        // list and its own mutex — different threads' trackers don't
+        // contend, even when they submit through the same Queue. Mirrors
+        // D3D12 backend's CommandList::executed (PR #119).
+        ICommandListLifetimeTracker* const tracker =
+            m_LifetimeTracker ? m_LifetimeTracker.Get()
+                              : queue.defaultLifetimeTracker.Get();
+        assert(tracker && "Queue must have a default lifetime tracker");
+        checked_cast<CommandListLifetimeTracker*>(tracker)->push(m_CurrentCmdBuf);
 
         m_CurrentCmdBuf = nullptr;
 

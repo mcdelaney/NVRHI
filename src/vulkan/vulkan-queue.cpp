@@ -83,7 +83,7 @@ namespace nvrhi::vulkan
     {
         std::lock_guard lockGuard(m_Mutex); // this is called from CommandList::open, so free-threaded
 
-        uint64_t recordingID = ++m_LastRecordingID;
+        uint64_t recordingID = m_LastRecordingID.fetch_add(1, std::memory_order_relaxed) + 1;
 
         TrackedCommandBufferPtr cmdBuf;
         if (m_CommandBuffersPool.empty())
@@ -149,7 +149,7 @@ namespace nvrhi::vulkan
             waitStageArray[i] = vk::PipelineStageFlagBits::eTopOfPipe;
         }
 
-        m_LastSubmittedID++;
+        const uint64_t submissionID = m_LastSubmittedID.fetch_add(1, std::memory_order_relaxed) + 1;
 
         for (size_t i = 0; i < numCmd; i++)
         {
@@ -157,17 +157,17 @@ namespace nvrhi::vulkan
             TrackedCommandBufferPtr commandBuffer = commandList->getCurrentCmdBuf();
 
             commandBuffers[i] = commandBuffer->cmdBuf;
-            m_CommandBuffersInFlight.push_back(commandBuffer);
+            commandBuffer->submissionID = submissionID;
 
             for (const auto& buffer : commandBuffer->referencedStagingBuffers)
             {
                 buffer->lastUseQueue = m_QueueID;
-                buffer->lastUseCommandListID = m_LastSubmittedID;
+                buffer->lastUseCommandListID = submissionID;
             }
         }
-        
+
         m_SignalSemaphores.push_back(trackingSemaphore);
-        m_SignalSemaphoreValues.push_back(m_LastSubmittedID);
+        m_SignalSemaphoreValues.push_back(submissionID);
 
         auto timelineSemaphoreInfo = vk::TimelineSemaphoreSubmitInfo()
             .setSignalSemaphoreValueCount(uint32_t(m_SignalSemaphoreValues.size()))
@@ -201,8 +201,16 @@ namespace nvrhi::vulkan
         m_WaitSemaphoreValues.clear();
         m_SignalSemaphores.clear();
         m_SignalSemaphoreValues.clear();
-        
-        return m_LastSubmittedID;
+
+        return submissionID;
+    }
+
+    void Queue::returnCommandBufferToPool(TrackedCommandBufferPtr cb)
+    {
+        if (!cb)
+            return;
+        std::lock_guard lockGuard(m_Mutex);
+        m_CommandBuffersPool.push_back(std::move(cb));
     }
 
     void Queue::updateTextureTileMappings(
@@ -326,67 +334,9 @@ namespace nvrhi::vulkan
 
     uint64_t Queue::updateLastFinishedID()
     {
-        m_LastFinishedID = m_Context.device.getSemaphoreCounterValue(trackingSemaphore);
-
-        return m_LastFinishedID;
-    }
-
-    void Queue::retireCommandBuffers()
-    {
-        // Lock so concurrent retire calls from different trackers don't
-        // race on m_CommandBuffersInFlight, m_CommandBuffersPool, or
-        // m_LastFinishedID. This is also the same mutex submit() holds,
-        // so a retire and a submit serialize naturally — important
-        // because retire moves entries between the in-flight list and
-        // the pool, and submit appends to the in-flight list.
-        std::lock_guard lockGuard(m_Mutex);
-
-        std::list<TrackedCommandBufferPtr> submissions = std::move(m_CommandBuffersInFlight);
-
-        uint64_t lastFinishedID = updateLastFinishedID();
-        
-        for (const TrackedCommandBufferPtr& cmd : submissions)
-        {
-            if (cmd->submissionID <= lastFinishedID)
-            {
-                cmd->referencedResources.clear();
-                cmd->referencedStagingBuffers.clear();
-                cmd->submissionID = 0;
-                m_CommandBuffersPool.push_back(cmd);
-
-#ifdef NVRHI_WITH_RTXMU
-                if (!cmd->rtxmuBuildIds.empty())
-                {
-                    std::lock_guard lockGuard(m_Context.rtxMuResources->asListMutex);
-                    
-                    m_Context.rtxMuResources->asBuildsCompleted.insert(m_Context.rtxMuResources->asBuildsCompleted.end(),
-                        cmd->rtxmuBuildIds.begin(), cmd->rtxmuBuildIds.end());
-
-                    cmd->rtxmuBuildIds.clear();
-                }
-                if (!cmd->rtxmuCompactionIds.empty())
-                {
-                    m_Context.rtxMemUtil->GarbageCollection(cmd->rtxmuCompactionIds);
-                    cmd->rtxmuCompactionIds.clear();
-                }
-#endif
-            }
-            else
-            {
-                m_CommandBuffersInFlight.push_back(cmd);
-            }
-        }
-    }
-
-    TrackedCommandBufferPtr Queue::getCommandBufferInFlight(uint64_t submissionID)
-    {
-        for (const TrackedCommandBufferPtr& cmd : m_CommandBuffersInFlight)
-        {
-            if (cmd->submissionID == submissionID)
-                return cmd;
-        }
-
-        return nullptr;
+        const uint64_t finished = m_Context.device.getSemaphoreCounterValue(trackingSemaphore);
+        m_LastFinishedID.store(finished, std::memory_order_release);
+        return finished;
     }
 
     VkSemaphore Device::getQueueSemaphore(CommandQueue queueID)

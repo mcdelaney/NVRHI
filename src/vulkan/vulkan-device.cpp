@@ -73,6 +73,18 @@ namespace nvrhi::vulkan
                 CommandQueue::Copy, desc.transferQueue, desc.transferQueueIndex);
         }
 
+        // Each queue owns a default lifetime tracker. CLs created without a
+        // per-CL tracker fall back to the queue's default. Mirrors D3D12
+        // backend's per-Queue Queue::lifetimeTracker (PR #119).
+        for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
+        {
+            if (m_Queues[i])
+            {
+                m_Queues[i]->defaultLifetimeTracker = createCommandListLifetimeTracker(
+                    static_cast<CommandQueue>(i));
+            }
+        }
+
         // maps Vulkan extension strings into the corresponding boolean flags in Device
         const std::unordered_map<std::string, bool*> extensionStringMap = {
             { VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, &m_Context.extensions.EXT_conservative_rasterization},
@@ -323,31 +335,41 @@ namespace nvrhi::vulkan
 
     void Device::runGarbageCollection()
     {
-        for (auto& m_Queue : m_Queues)
+        // Drive each queue's default lifetime tracker. Per-CL trackers
+        // (set via CommandListParameters::lifetimeTracker) are owned by
+        // the application and must be driven on the application's schedule
+        // — typically the same thread that submits CLs through them.
+        for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
         {
-            if (m_Queue)
-            {
-                m_Queue->retireCommandBuffers();
-            }
+            if (m_Queues[i] && m_Queues[i]->defaultLifetimeTracker)
+                m_Queues[i]->defaultLifetimeTracker->runGarbageCollection();
         }
     }
 
-    // CommandListLifetimeTracker implementation. The tracker wraps the
-    // queue's existing retire path so callers (typically a worker thread
-    // submitting on a non-default queue) can drive garbage collection on
-    // their own schedule. The Queue's retireCommandBuffers locks the
-    // queue mutex internally, which is the same mutex Queue::submit holds
-    // for its entire body — concurrent submitters from different threads
-    // therefore serialize correctly on the same VkQueue and trackingSemaphore
-    // counter. This is the minimal implementation needed for thread-safe
-    // submission; a future change can move the in-flight list to be
-    // per-tracker for full per-thread parallelism in retire as well.
+    // CommandListLifetimeTracker — Vulkan implementation that mirrors the
+    // D3D12 backend's per-tracker in-flight list (PR #119). Each tracker
+    // owns its own list and its own mutex; runGarbageCollection iterates
+    // only this tracker's list and returns retired command buffers to the
+    // queue's shared pool. Two threads with separate trackers retire
+    // without contending — that's the per-thread parallelism advantage
+    // over a single shared queue-wide list.
     CommandListLifetimeTracker::CommandListLifetimeTracker(
-        Device* device, CommandQueue executionQueue)
-        : m_Device(device)
+        const VulkanContext& context, Device* device, CommandQueue executionQueue)
+        : m_Context(context)
+        , m_Device(device)
         , m_ExecutionQueue(executionQueue)
     {
         assert(m_Device);
+    }
+
+    CommandListLifetimeTracker::~CommandListLifetimeTracker() = default;
+
+    void CommandListLifetimeTracker::push(TrackedCommandBufferPtr cb)
+    {
+        if (!cb)
+            return;
+        std::lock_guard lockGuard(m_Mutex);
+        m_CommandBuffersInFlight.push_back(std::move(cb));
     }
 
     void CommandListLifetimeTracker::runGarbageCollection()
@@ -355,15 +377,78 @@ namespace nvrhi::vulkan
         if (!m_Device)
             return;
         Queue* queue = m_Device->getQueue(m_ExecutionQueue);
-        if (queue)
-            queue->retireCommandBuffers();
+        if (!queue)
+            return;
+
+        // Poll the queue's tracking semaphore. updateLastFinishedID acquires
+        // the queue mutex briefly; that contends with concurrent submitters
+        // but only for the duration of a single getSemaphoreCounterValue
+        // (microseconds). It does NOT contend with other trackers' retire
+        // work — they iterate their own private in-flight lists.
+        const uint64_t lastFinishedID = queue->updateLastFinishedID();
+
+        // Move all in-flight entries to a local list under our own mutex,
+        // then walk them lock-free; entries that have not yet retired get
+        // pushed back at the end. Retired entries' resources release here
+        // (referencedResources/referencedStagingBuffers shared_ptrs drop)
+        // and the underlying TrackedCommandBuffer goes back to the queue's
+        // free pool for reuse on a later getOrCreateCommandBuffer.
+        std::list<TrackedCommandBufferPtr> submissions;
+        {
+            std::lock_guard lockGuard(m_Mutex);
+            submissions = std::move(m_CommandBuffersInFlight);
+        }
+
+        std::list<TrackedCommandBufferPtr> stillInFlight;
+        for (TrackedCommandBufferPtr& cb : submissions)
+        {
+            if (cb->submissionID <= lastFinishedID)
+            {
+                cb->referencedResources.clear();
+                cb->referencedStagingBuffers.clear();
+                cb->submissionID = 0;
+
+#ifdef NVRHI_WITH_RTXMU
+                if (!cb->rtxmuBuildIds.empty())
+                {
+                    std::lock_guard rtxmuLock(m_Context.rtxMuResources->asListMutex);
+                    m_Context.rtxMuResources->asBuildsCompleted.insert(
+                        m_Context.rtxMuResources->asBuildsCompleted.end(),
+                        cb->rtxmuBuildIds.begin(), cb->rtxmuBuildIds.end());
+                    cb->rtxmuBuildIds.clear();
+                }
+                if (!cb->rtxmuCompactionIds.empty())
+                {
+                    m_Context.rtxMemUtil->GarbageCollection(cb->rtxmuCompactionIds);
+                    cb->rtxmuCompactionIds.clear();
+                }
+#endif
+
+                queue->returnCommandBufferToPool(std::move(cb));
+            }
+            else
+            {
+                stillInFlight.push_back(std::move(cb));
+            }
+        }
+
+        // Splice still-in-flight entries back. We splice rather than
+        // assign because other threads might have called push() between
+        // our move and now; those pushes added to the (now empty) live
+        // list. Splicing preserves their order ahead of our re-adds.
+        if (!stillInFlight.empty())
+        {
+            std::lock_guard lockGuard(m_Mutex);
+            m_CommandBuffersInFlight.splice(
+                m_CommandBuffersInFlight.begin(), stillInFlight);
+        }
     }
 
     CommandListLifetimeTrackerHandle Device::createCommandListLifetimeTracker(
         CommandQueue executionQueue)
     {
         return CommandListLifetimeTrackerHandle::Create(
-            new CommandListLifetimeTracker(this, executionQueue));
+            new CommandListLifetimeTracker(m_Context, this, executionQueue));
     }
 
     bool Device::queryFeatureSupport(Feature feature, void* pInfo, size_t infoSize)
