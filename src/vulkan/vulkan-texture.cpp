@@ -338,6 +338,29 @@ namespace nvrhi::vulkan
 
         m_Context.nameVKObject(texture->image, vk::ObjectType::eImage, vk::DebugReportObjectTypeEXT::eImage, desc.debugName.c_str());
 
+        if (desc.isTiled)
+        {
+            // Compute the sparse tile byte size for this format. Was hardcoded
+            // 65536, which is wrong for BC1/BC4 (32 KB) and any other format
+            // whose Vulkan standard sparse tile is not 64 KB. We derive it
+            // from VkSparseImageFormatProperties::imageGranularity (in texels)
+            // and the format's block size + bytes-per-block.
+            const auto formatProps = m_Context.physicalDevice.getSparseImageFormatProperties(
+                texture->imageInfo.format, texture->imageInfo.imageType,
+                texture->imageInfo.samples, texture->imageInfo.usage,
+                texture->imageInfo.tiling);
+            if (!formatProps.empty())
+            {
+                const auto& gran = formatProps[0].imageGranularity;
+                const FormatInfo& fi = getFormatInfo(desc.format);
+                const uint32_t blk = fi.blockSize ? fi.blockSize : 1u;
+                const uint32_t bw = gran.width / blk;
+                const uint32_t bh = gran.height / blk;
+                const uint32_t bd = gran.depth ? gran.depth : 1u;
+                texture->tileByteSize = bw * bh * bd * fi.bytesPerBlock;
+            }
+        }
+
         if (!desc.isVirtual && !desc.isTiled)
         {
             res = m_Allocator.allocateTextureMemory(texture);

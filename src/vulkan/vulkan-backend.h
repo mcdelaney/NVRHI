@@ -393,7 +393,10 @@ namespace nvrhi::vulkan
         vk::ImageCreateInfo imageInfo;
         vk::ExternalMemoryImageCreateInfo externalMemoryImageInfo;
         vk::Image image;
-        static constexpr uint32_t tileByteSize = 65536;
+        // Sparse tile byte size, computed in createTexture from the format's
+        // standard sparse-image granularity. Default is the prior 64 KB; only
+        // accessed for tiled (sparse) textures, set there.
+        uint32_t tileByteSize = 65536;
 
         HeapHandle heap;
 
