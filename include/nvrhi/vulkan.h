@@ -91,6 +91,17 @@ namespace nvrhi::vulkan
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) = 0;
+
+        // Submit ppCmd with the per-submit wait/signal extras AND drain
+        // the queue's accumulator atomically (under the queue mutex).
+        // Use for the swapchain-tail submit when both extras (e.g.
+        // acquire wait + present_sem signal) AND queued accumulator
+        // items (e.g. a worker-submit-id wait queued earlier in the
+        // frame) need to attach to this specific submit.
+        virtual uint64_t executeCommandListsWithSyncDraining(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

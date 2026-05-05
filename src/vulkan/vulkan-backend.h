@@ -250,6 +250,16 @@ namespace nvrhi::vulkan
         // signal). The plain submit() drains the accumulator as before.
         uint64_t submitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
 
+        // Submit with explicit per-submit waits/signals AND drain the
+        // queue's accumulator atomically. Use this for the swapchain-tail
+        // submit when it has both extras (acquire wait, present_sem
+        // signal, terrain front-use signal — things attached to THIS
+        // specific submit) and accumulator items to consume (e.g. a
+        // worker submit-id wait queued earlier in the frame). The atomic
+        // merge under the queue mutex prevents either source from being
+        // stolen by another submit on the same queue.
+        uint64_t submitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
+
     private:
         uint64_t submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator);
     public:
@@ -1250,6 +1260,10 @@ namespace nvrhi::vulkan
         uint64_t queueGetCompletedInstance(CommandQueue queue) override;
         std::mutex& getQueueMutex(CommandQueue queue) override;
         uint64_t executeCommandListsWithSyncIsolated(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) override;
+        uint64_t executeCommandListsWithSyncDraining(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) override;

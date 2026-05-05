@@ -135,6 +135,11 @@ namespace nvrhi::vulkan
         return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/false);
     }
 
+    uint64_t Queue::submitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras)
+    {
+        return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/true);
+    }
+
     uint64_t Queue::submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator)
     {
         // Hold the queue mutex for the entire body. This serves three
