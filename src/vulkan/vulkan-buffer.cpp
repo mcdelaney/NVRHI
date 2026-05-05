@@ -117,6 +117,16 @@ namespace nvrhi::vulkan
             .setUsage(usageFlags)
             .setSharingMode(vk::SharingMode::eExclusive);
 
+        // Promote to Concurrent if requested AND the device has more than
+        // one queue family. See TextureDesc::sharedAcrossQueues docs.
+        if (desc.sharedAcrossQueues && !m_ConcurrentQueueFamilyIndices.empty())
+        {
+            bufferInfo
+                .setSharingMode(vk::SharingMode::eConcurrent)
+                .setQueueFamilyIndexCount(static_cast<uint32_t>(m_ConcurrentQueueFamilyIndices.size()))
+                .setPQueueFamilyIndices(m_ConcurrentQueueFamilyIndices.data());
+        }
+
 #if _WIN32
         const auto handleType = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
 #else

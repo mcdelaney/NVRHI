@@ -423,6 +423,17 @@ namespace nvrhi
 
         SharedResourceFlags sharedResourceFlags = SharedResourceFlags::None;
 
+        // When true, the resource is created so that it can be safely used
+        // from multiple queue families (Graphics + Compute + Copy if those
+        // are distinct families on the device). On Vulkan this maps to
+        // VK_SHARING_MODE_CONCURRENT with the queue-family indices the
+        // device exposes. No-op on other backends, where resources are
+        // implicitly shareable across queues. Use sparingly: there is a
+        // (typically small) perf cost on Vulkan vs. exclusive sharing,
+        // but using an exclusive resource from a non-owning queue family
+        // without a release/acquire QFOT is undefined behavior.
+        bool sharedAcrossQueues = false;
+
         // Indicates that the texture is created with no backing memory,
         // and memory is bound to the texture later using bindTextureMemory.
         // On DX12, the texture resource is created at the time of memory binding.
@@ -458,6 +469,7 @@ namespace nvrhi
         constexpr TextureDesc& setInitialState(ResourceStates value) { initialState = value; return *this; }
         constexpr TextureDesc& setKeepInitialState(bool value) { keepInitialState = value; return *this; }
         constexpr TextureDesc& setSharedResourceFlags(SharedResourceFlags value) { sharedResourceFlags = value; return *this; }
+        constexpr TextureDesc& setSharedAcrossQueues(bool value) { sharedAcrossQueues = value; return *this; }
         
         // Equivalent to .setInitialState(_initialState).setKeepInitialState(true)
         constexpr TextureDesc& enableAutomaticStateTracking(ResourceStates _initialState)
@@ -701,6 +713,11 @@ namespace nvrhi
 
         SharedResourceFlags sharedResourceFlags = SharedResourceFlags::None;
 
+        // See TextureDesc::sharedAcrossQueues. On Vulkan this creates the
+        // buffer with VK_SHARING_MODE_CONCURRENT across all distinct queue
+        // families exposed by the device. No-op on other backends.
+        bool sharedAcrossQueues = false;
+
         constexpr BufferDesc& setByteSize(uint64_t value) { byteSize = value; return *this; }
         constexpr BufferDesc& setStructStride(uint32_t value) { structStride = value; return *this; }
         constexpr BufferDesc& setMaxVersions(uint32_t value) { maxVersions = value; return *this; }
@@ -721,6 +738,7 @@ namespace nvrhi
         constexpr BufferDesc& setInitialState(ResourceStates value) { initialState = value; return *this; }
         constexpr BufferDesc& setKeepInitialState(bool value) { keepInitialState = value; return *this; }
         constexpr BufferDesc& setCpuAccess(CpuAccessMode value) { cpuAccess = value; return *this; }
+        constexpr BufferDesc& setSharedAcrossQueues(bool value) { sharedAcrossQueues = value; return *this; }
 
         // Equivalent to .setInitialState(_initialState).setKeepInitialState(true)
         constexpr BufferDesc& enableAutomaticStateTracking(ResourceStates _initialState)

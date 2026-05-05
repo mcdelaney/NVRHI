@@ -37,6 +37,12 @@ namespace nvrhi::vulkan
             desc.cpuAccess = CpuAccessMode::None;
             desc.debugName = "ScratchBufferChunk";
             desc.canHaveUAVs = true;
+            // Upload chunks back writeTexture/writeBuffer copies in any CL,
+            // including CLs the app submits to a Compute or Copy queue on
+            // a different queue family. Mark Concurrent so the buffer is
+            // legal to read from those families. No-op when the device
+            // collapses all queues to one family.
+            desc.sharedAcrossQueues = true;
 
             chunk->buffer = m_Device->createBuffer(desc);
             chunk->mappedMemory = nullptr;
@@ -52,6 +58,7 @@ namespace nvrhi::vulkan
             // The upload manager buffers are used in buildTopLevelAccelStruct to store instance data, and SBT for shader entries
             desc.isAccelStructBuildInput = m_Device->queryFeatureSupport(Feature::RayTracingAccelStruct);
             desc.isShaderBindingTable = m_Device->queryFeatureSupport(Feature::RayTracingAccelStruct);
+            desc.sharedAcrossQueues = true;
 
             chunk->buffer = m_Device->createBuffer(desc);
             chunk->mappedMemory = m_Device->mapBuffer(chunk->buffer, CpuAccessMode::Write);

@@ -277,6 +277,8 @@ namespace nvrhi::vulkan
         bool pollCommandList(uint64_t commandListID);
         bool waitCommandList(uint64_t commandListID, uint64_t timeout);
 
+        uint32_t getQueueFamilyIndex() const { return m_QueueFamilyIndex; }
+
         // Internal: push a TrackedCommandBuffer onto the queue's command-
         // buffer pool. Called by CommandListLifetimeTracker after the
         // command buffer has been observed to have retired on the GPU.
@@ -1284,7 +1286,15 @@ namespace nvrhi::vulkan
 
         // array of submission queues
         std::array<std::unique_ptr<Queue>, uint32_t(CommandQueue::Count)> m_Queues;
-        
+
+        // Unique queue family indices across all configured queues, computed
+        // once after the queues are constructed. Used to populate
+        // VK_SHARING_MODE_CONCURRENT resources (see TextureDesc::
+        // sharedAcrossQueues). Empty if all queues share one family — in
+        // that case Concurrent isn't needed and the resource is created
+        // Exclusive regardless of the desc flag.
+        std::vector<uint32_t> m_ConcurrentQueueFamilyIndices;
+
         void *mapBuffer(IBuffer* b, CpuAccessMode flags, uint64_t offset, size_t size) const;
     };
 

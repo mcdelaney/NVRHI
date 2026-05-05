@@ -332,6 +332,18 @@ namespace nvrhi::vulkan
         assert(texture);
         fillTextureInfo(texture, desc);
 
+        // Apply VK_SHARING_MODE_CONCURRENT if requested AND the device has
+        // more than one queue family. The cached index list is empty when
+        // all queues share a family — Concurrent is unnecessary and incurs
+        // a small perf cost, so leave the resource Exclusive in that case.
+        if (desc.sharedAcrossQueues && !m_ConcurrentQueueFamilyIndices.empty())
+        {
+            texture->imageInfo
+                .setSharingMode(vk::SharingMode::eConcurrent)
+                .setQueueFamilyIndexCount(static_cast<uint32_t>(m_ConcurrentQueueFamilyIndices.size()))
+                .setPQueueFamilyIndices(m_ConcurrentQueueFamilyIndices.data());
+        }
+
         vk::Result res = m_Context.device.createImage(&texture->imageInfo, m_Context.allocationCallbacks, &texture->image);
         ASSERT_VK_OK(res);
         CHECK_VK_FAIL(res)

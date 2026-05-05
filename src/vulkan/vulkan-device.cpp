@@ -85,6 +85,26 @@ namespace nvrhi::vulkan
             }
         }
 
+        // Collect unique queue family indices for VK_SHARING_MODE_CONCURRENT.
+        // If all queues collapse to a single family, leave the list empty so
+        // resources stay Exclusive (no perf cost).
+        {
+            std::array<uint32_t, uint32_t(CommandQueue::Count)> indices {};
+            uint32_t numIndices = 0;
+            for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
+            {
+                if (!m_Queues[i]) continue;
+                const uint32_t family = m_Queues[i]->getQueueFamilyIndex();
+                bool seen = false;
+                for (uint32_t j = 0; j < numIndices; ++j)
+                    if (indices[j] == family) { seen = true; break; }
+                if (!seen)
+                    indices[numIndices++] = family;
+            }
+            if (numIndices > 1)
+                m_ConcurrentQueueFamilyIndices.assign(indices.begin(), indices.begin() + numIndices);
+        }
+
         // maps Vulkan extension strings into the corresponding boolean flags in Device
         const std::unordered_map<std::string, bool*> extensionStringMap = {
             { VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, &m_Context.extensions.EXT_conservative_rasterization},
