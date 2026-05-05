@@ -122,6 +122,9 @@ namespace nvrhi::vulkan
         assert(bufDesc.byteSize > 0);
         bufDesc.debugName = desc.debugName;
         bufDesc.cpuAccess = cpuAccess;
+        // Inherit cross-queue sharing from the texture desc — the staging
+        // buffer is touched by whatever queue family runs the copy CL.
+        bufDesc.sharedAcrossQueues = desc.sharedAcrossQueues;
 
         BufferHandle internalBuffer = createBuffer(bufDesc);
         tex->buffer = checked_cast<Buffer*>(internalBuffer.Get());
