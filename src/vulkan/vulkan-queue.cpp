@@ -127,6 +127,16 @@ namespace nvrhi::vulkan
 
     uint64_t Queue::submit(ICommandList* const* ppCmd, size_t numCmd)
     {
+        return submitImpl(ppCmd, numCmd, /*extras=*/nullptr, /*drainAccumulator=*/true);
+    }
+
+    uint64_t Queue::submitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras)
+    {
+        return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/false);
+    }
+
+    uint64_t Queue::submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator)
+    {
         // Hold the queue mutex for the entire body. This serves three
         // purposes:
         //   1. Serializes vk::Queue.submit calls — Vulkan requires external
@@ -141,10 +151,65 @@ namespace nvrhi::vulkan
         //      duplicate values (validator VUID-VkSubmitInfo-pSignalSemaphores-03242).
         std::lock_guard lockGuard(m_Mutex);
 
-        std::vector<vk::PipelineStageFlags> waitStageArray(m_WaitSemaphores.size());
+        // Decide which wait/signal sources to use:
+        //   drainAccumulator = true (default submit): use the queue's
+        //     accumulator (queueWaitForSemaphore / queueSignalSemaphore /
+        //     queueWaitForCommandList queued before this submit). This is
+        //     the original behavior — every submit on this queue consumes
+        //     anything that's been queued for "the next submit".
+        //   drainAccumulator = false (submitWithSyncIsolated): bypass the
+        //     accumulator entirely. Use ONLY the per-submit `extras`. This
+        //     is what worker threads should use when they don't want to
+        //     consume waits/signals queued by other code for a different
+        //     intended submit (e.g., the swapchain-tail's acquire wait +
+        //     present_sem signal, or terrain-front-use signals queued by
+        //     the render thread for its own tail submit). Solves the
+        //     "accumulator stealing" race.
+        std::vector<vk::Semaphore> localWaitSemaphores;
+        std::vector<uint64_t> localWaitSemaphoreValues;
+        std::vector<vk::Semaphore> localSignalSemaphores;
+        std::vector<uint64_t> localSignalSemaphoreValues;
+
+        std::vector<vk::Semaphore>* waitSemaphores;
+        std::vector<uint64_t>* waitSemaphoreValues;
+        std::vector<vk::Semaphore>* signalSemaphores;
+        std::vector<uint64_t>* signalSemaphoreValues;
+
+        if (drainAccumulator)
+        {
+            waitSemaphores = &m_WaitSemaphores;
+            waitSemaphoreValues = &m_WaitSemaphoreValues;
+            signalSemaphores = &m_SignalSemaphores;
+            signalSemaphoreValues = &m_SignalSemaphoreValues;
+        }
+        else
+        {
+            waitSemaphores = &localWaitSemaphores;
+            waitSemaphoreValues = &localWaitSemaphoreValues;
+            signalSemaphores = &localSignalSemaphores;
+            signalSemaphoreValues = &localSignalSemaphoreValues;
+        }
+
+        if (extras)
+        {
+            for (uint32_t i = 0; i < extras->numWaits; ++i)
+            {
+                waitSemaphores->push_back(vk::Semaphore(extras->waitSemaphores[i]));
+                waitSemaphoreValues->push_back(extras->waitValues
+                    ? extras->waitValues[i] : 0ull);
+            }
+            for (uint32_t i = 0; i < extras->numSignals; ++i)
+            {
+                signalSemaphores->push_back(vk::Semaphore(extras->signalSemaphores[i]));
+                signalSemaphoreValues->push_back(extras->signalValues
+                    ? extras->signalValues[i] : 0ull);
+            }
+        }
+
+        std::vector<vk::PipelineStageFlags> waitStageArray(waitSemaphores->size());
         std::vector<vk::CommandBuffer> commandBuffers(numCmd);
 
-        for (size_t i = 0; i < m_WaitSemaphores.size(); i++)
+        for (size_t i = 0; i < waitSemaphores->size(); i++)
         {
             waitStageArray[i] = vk::PipelineStageFlagBits::eTopOfPipe;
         }
@@ -166,28 +231,28 @@ namespace nvrhi::vulkan
             }
         }
 
-        m_SignalSemaphores.push_back(trackingSemaphore);
-        m_SignalSemaphoreValues.push_back(submissionID);
+        signalSemaphores->push_back(trackingSemaphore);
+        signalSemaphoreValues->push_back(submissionID);
 
         auto timelineSemaphoreInfo = vk::TimelineSemaphoreSubmitInfo()
-            .setSignalSemaphoreValueCount(uint32_t(m_SignalSemaphoreValues.size()))
-            .setPSignalSemaphoreValues(m_SignalSemaphoreValues.data());
+            .setSignalSemaphoreValueCount(uint32_t(signalSemaphoreValues->size()))
+            .setPSignalSemaphoreValues(signalSemaphoreValues->data());
 
-        if (!m_WaitSemaphoreValues.empty()) 
+        if (!waitSemaphoreValues->empty())
         {
-            timelineSemaphoreInfo.setWaitSemaphoreValueCount(uint32_t(m_WaitSemaphoreValues.size()));
-            timelineSemaphoreInfo.setPWaitSemaphoreValues(m_WaitSemaphoreValues.data());
+            timelineSemaphoreInfo.setWaitSemaphoreValueCount(uint32_t(waitSemaphoreValues->size()));
+            timelineSemaphoreInfo.setPWaitSemaphoreValues(waitSemaphoreValues->data());
         }
 
         auto submitInfo = vk::SubmitInfo()
             .setPNext(&timelineSemaphoreInfo)
             .setCommandBufferCount(uint32_t(numCmd))
             .setPCommandBuffers(commandBuffers.data())
-            .setWaitSemaphoreCount(uint32_t(m_WaitSemaphores.size()))
-            .setPWaitSemaphores(m_WaitSemaphores.empty() ? nullptr : m_WaitSemaphores.data())
+            .setWaitSemaphoreCount(uint32_t(waitSemaphores->size()))
+            .setPWaitSemaphores(waitSemaphores->empty() ? nullptr : waitSemaphores->data())
             .setPWaitDstStageMask(waitStageArray.data())
-            .setSignalSemaphoreCount(uint32_t(m_SignalSemaphores.size()))
-            .setPSignalSemaphores(m_SignalSemaphores.empty() ? nullptr : m_SignalSemaphores.data());
+            .setSignalSemaphoreCount(uint32_t(signalSemaphores->size()))
+            .setPSignalSemaphores(signalSemaphores->empty() ? nullptr : signalSemaphores->data());
 
         try {
             m_Queue.submit(submitInfo);
@@ -197,10 +262,13 @@ namespace nvrhi::vulkan
             m_Context.messageCallback->message(MessageSeverity::Error, "Device Removed!");
         }
 
-        m_WaitSemaphores.clear();
-        m_WaitSemaphoreValues.clear();
-        m_SignalSemaphores.clear();
-        m_SignalSemaphoreValues.clear();
+        if (drainAccumulator)
+        {
+            m_WaitSemaphores.clear();
+            m_WaitSemaphoreValues.clear();
+            m_SignalSemaphores.clear();
+            m_SignalSemaphoreValues.clear();
+        }
 
         return submissionID;
     }

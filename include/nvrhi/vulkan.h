@@ -37,6 +37,25 @@ namespace nvrhi
 
 namespace nvrhi::vulkan
 {
+    // Per-submit wait/signal extras for IDevice::executeCommandListsWithSyncIsolated.
+    // The semaphores are appended to this submit's wait/signal lists ONLY —
+    // the queue's wait/signal accumulator (queueWaitForSemaphore /
+    // queueSignalSemaphore / queueWaitForCommandList) is left untouched, so
+    // entries queued there for "the next submit" are NOT consumed by this
+    // submit. Use this for worker submits that share a queue with another
+    // submitter that has critical syncs queued via the accumulator (e.g.
+    // the swapchain-tail's acquire wait + present_sem signal). The plain
+    // executeCommandLists() drains the accumulator as before.
+    struct SubmitSyncExtras
+    {
+        const VkSemaphore* waitSemaphores = nullptr;
+        const uint64_t* waitValues = nullptr;     // 0 for binary, monotonic value for timeline
+        uint32_t numWaits = 0;
+        const VkSemaphore* signalSemaphores = nullptr;
+        const uint64_t* signalValues = nullptr;   // 0 for binary, monotonic value for timeline
+        uint32_t numSignals = 0;
+    };
+
     class IDevice : public nvrhi::IDevice
     {
     public:
@@ -64,6 +83,14 @@ namespace nvrhi::vulkan
             ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
             CommandQueue executionQueue,
             VkSemaphore signalSemaphore, uint64_t signalValue) = 0;
+
+        // Submit ppCmd with the per-submit wait/signal extras attached to
+        // THIS submit only, BYPASSING the queue accumulator. See SubmitSyncExtras
+        // doc above.
+        virtual uint64_t executeCommandListsWithSyncIsolated(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

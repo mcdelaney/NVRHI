@@ -240,6 +240,20 @@ namespace nvrhi::vulkan
         // submits a command buffer to this queue, returns submissionID
         uint64_t submit(ICommandList* const* ppCmd, size_t numCmd);
 
+        // Submit with explicit per-submit waits/signals, BYPASSING the
+        // queue's accumulator. The accumulator (queueWaitForSemaphore /
+        // queueSignalSemaphore / queueWaitForCommandList queued for "the
+        // next submit") is left untouched — items there are NOT consumed
+        // by this submit. Use this for worker submits that share a queue
+        // with another submitter that has critical syncs queued via the
+        // accumulator (e.g. the swapchain-tail's acquire wait + present
+        // signal). The plain submit() drains the accumulator as before.
+        uint64_t submitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
+
+    private:
+        uint64_t submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator);
+    public:
+
         void updateTextureTileMappings(
             ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
             VkSemaphore signalSemaphore = VK_NULL_HANDLE, uint64_t signalValue = 0);
@@ -1235,6 +1249,10 @@ namespace nvrhi::vulkan
         void queueSignalSemaphore(CommandQueue executionQueue, VkSemaphore semaphore, uint64_t value) override;
         uint64_t queueGetCompletedInstance(CommandQueue queue) override;
         std::mutex& getQueueMutex(CommandQueue queue) override;
+        uint64_t executeCommandListsWithSyncIsolated(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
