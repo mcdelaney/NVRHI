@@ -329,6 +329,9 @@ namespace nvrhi::vulkan
             bindSparseInfo.setPNext(&timelineInfo);
         }
 
+        // VkQueue external-sync: bindSparse on the same VkQueue as submit
+        // (or presentKHR) needs serialization. Same mutex as Queue::submit.
+        std::lock_guard lockGuard(m_Mutex);
         m_Queue.bindSparse(bindSparseInfo, vk::Fence());
     }
 
@@ -344,6 +347,12 @@ namespace nvrhi::vulkan
         Queue& queue = *m_Queues[uint32_t(queueID)];
 
         return queue.trackingSemaphore;
+    }
+
+    std::mutex& Device::getQueueMutex(CommandQueue queueID)
+    {
+        Queue& queue = *m_Queues[uint32_t(queueID)];
+        return queue.getMutex();
     }
 
     void Device::queueWaitForSemaphore(CommandQueue waitQueueID, VkSemaphore semaphore, uint64_t value)

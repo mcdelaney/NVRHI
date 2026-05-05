@@ -258,6 +258,13 @@ namespace nvrhi::vulkan
         // command buffer has been observed to have retired on the GPU.
         void returnCommandBufferToPool(TrackedCommandBufferPtr cb);
 
+        // Vulkan requires external synchronization on a VkQueue across
+        // ALL queue ops (submit, present, bindSparse). NVRHI's submit
+        // and bindSparse take m_Mutex internally; the application must
+        // use this same mutex when calling vkQueuePresentKHR (or any
+        // raw VkQueue op) on the same queue from another thread.
+        std::mutex& getMutex() { return m_Mutex; }
+
     private:
         const VulkanContext& m_Context;
 
@@ -1227,6 +1234,7 @@ namespace nvrhi::vulkan
         void queueWaitForSemaphore(CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value) override;
         void queueSignalSemaphore(CommandQueue executionQueue, VkSemaphore semaphore, uint64_t value) override;
         uint64_t queueGetCompletedInstance(CommandQueue queue) override;
+        std::mutex& getQueueMutex(CommandQueue queue) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order

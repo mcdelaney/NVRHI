@@ -25,6 +25,8 @@
 #include <vulkan/vulkan.h>
 #include <nvrhi/nvrhi.h>
 
+#include <mutex>
+
 namespace nvrhi 
 {
     namespace ObjectTypes
@@ -43,6 +45,16 @@ namespace nvrhi::vulkan
         virtual void queueWaitForSemaphore(CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value) = 0;
         virtual void queueSignalSemaphore(CommandQueue executionQueue, VkSemaphore semaphore, uint64_t value) = 0;
         virtual uint64_t queueGetCompletedInstance(CommandQueue queue) = 0;
+
+        // Vulkan requires external synchronization on a VkQueue across ALL
+        // queue ops (vkQueueSubmit, vkQueuePresentKHR, vkQueueBindSparse).
+        // NVRHI's submit and bindSparse take this mutex internally; the
+        // application MUST hold this mutex when calling vkQueuePresentKHR
+        // (or any raw VkQueue operation) on the same queue from another
+        // thread. Without this, multi-threaded submit + present produces
+        // VK validator THREADING_ERROR plus undefined behavior up to and
+        // including vk::Queue::*: ErrorDeviceLost.
+        virtual std::mutex& getQueueMutex(CommandQueue queue) = 0;
 
         // Sparse-residency variant that signals signalSemaphore at signalValue
         // from vkQueueBindSparse, so the caller can wait on the bind from a
