@@ -432,6 +432,12 @@ namespace nvrhi
         // (typically small) perf cost on Vulkan vs. exclusive sharing,
         // but using an exclusive resource from a non-owning queue family
         // without a release/acquire QFOT is undefined behavior.
+        //
+        // Has no effect for createHandleForNativeTexture/createHandleForNative
+        // Buffer — those wrap an externally-created VkImage/VkBuffer whose
+        // sharing mode was fixed at creation. The wrapper just stores this
+        // flag in the desc; the native object's actual sharing mode is
+        // whatever the creator chose.
         bool sharedAcrossQueues = false;
 
         // Indicates that the texture is created with no backing memory,
