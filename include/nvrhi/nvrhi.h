@@ -1320,6 +1320,14 @@ namespace nvrhi
         FramebufferAttachment depthAttachment;
         FramebufferAttachment shadingRateAttachment;
 
+        // VK_KHR_multiview viewMask. 0 = single-view rendering (default).
+        // A non-zero bitmask enables multiview rendering — one bit per view.
+        // The attached textures must be array textures with at least
+        // (highest set bit + 1) array slices. Pipelines created against
+        // the matching FramebufferInfo must use the same viewMask.
+        // D3D backends ignore this field (multiview is a Vulkan feature).
+        uint32_t viewMask = 0;
+
         FramebufferDesc& addColorAttachment(const FramebufferAttachment& a) { colorAttachments.push_back(a); return *this; }
         FramebufferDesc& addColorAttachment(ITexture* texture) { colorAttachments.push_back(FramebufferAttachment().setTexture(texture)); return *this; }
         FramebufferDesc& addColorAttachment(ITexture* texture, TextureSubresourceSet subresources) { colorAttachments.push_back(FramebufferAttachment().setTexture(texture).setSubresources(subresources)); return *this; }
@@ -1329,6 +1337,7 @@ namespace nvrhi
         FramebufferDesc& setShadingRateAttachment(const FramebufferAttachment& d) { shadingRateAttachment = d; return *this; }
         FramebufferDesc& setShadingRateAttachment(ITexture* texture) { shadingRateAttachment = FramebufferAttachment().setTexture(texture); return *this; }
         FramebufferDesc& setShadingRateAttachment(ITexture* texture, TextureSubresourceSet subresources) { shadingRateAttachment = FramebufferAttachment().setTexture(texture).setSubresources(subresources); return *this; }
+        FramebufferDesc& setViewMask(uint32_t value) { viewMask = value; return *this; }
     };
 
     // Describes the parameters of a framebuffer that can be used to determine if a given framebuffer
@@ -1340,16 +1349,22 @@ namespace nvrhi
         Format depthFormat = Format::UNKNOWN;
         uint32_t sampleCount = 1;
         uint32_t sampleQuality = 0;
+        // VK_KHR_multiview viewMask — mirrored from FramebufferDesc so that
+        // pipelines created against this FramebufferInfo encode the same
+        // viewMask into their PipelineRenderingCreateInfo. Compatibility
+        // requires an exact match (per Vulkan spec).
+        uint32_t viewMask = 0;
 
         FramebufferInfo() = default;
         NVRHI_API FramebufferInfo(const FramebufferDesc& desc);
-        
+
         bool operator==(const FramebufferInfo& other) const
         {
             return formatsEqual(colorFormats, other.colorFormats)
                 && depthFormat == other.depthFormat
                 && sampleCount == other.sampleCount
-                && sampleQuality == other.sampleQuality;
+                && sampleQuality == other.sampleQuality
+                && viewMask == other.viewMask;
         }
         bool operator!=(const FramebufferInfo& other) const { return !(*this == other); }
 
@@ -1357,6 +1372,7 @@ namespace nvrhi
         FramebufferInfo& setDepthFormat(Format format) { depthFormat = format; return *this; }
         FramebufferInfo& setSampleCount(uint32_t count) { sampleCount = count; return *this; }
         FramebufferInfo& setSampleQuality(uint32_t quality) { sampleQuality = quality; return *this; }
+        FramebufferInfo& setViewMask(uint32_t value) { viewMask = value; return *this; }
 
     private:
         static bool formatsEqual(const static_vector<Format, c_MaxRenderTargets>& a, const static_vector<Format, c_MaxRenderTargets>& b)

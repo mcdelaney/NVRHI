@@ -407,7 +407,8 @@ namespace nvrhi::vulkan
             .setColorAttachmentCount(uint32_t(fbinfo.colorFormats.size()))
             .setPColorAttachmentFormats(colorFormats.data())
             .setDepthAttachmentFormat(depthStencilFormatInfo.hasDepth ? depthStencilFormat : vk::Format::eUndefined)
-            .setStencilAttachmentFormat(depthStencilFormatInfo.hasStencil ? depthStencilFormat : vk::Format::eUndefined);
+            .setStencilAttachmentFormat(depthStencilFormatInfo.hasStencil ? depthStencilFormat : vk::Format::eUndefined)
+            .setViewMask(fbinfo.viewMask);
 
         auto pipelineInfo = vk::GraphicsPipelineCreateInfo()
             .setPNext(&renderingInfo)
@@ -500,6 +501,7 @@ namespace nvrhi::vulkan
                 .setOffset(vk::Offset2D(0, 0))
                 .setExtent(vk::Extent2D(framebuffer->framebufferInfo.width, framebuffer->framebufferInfo.height)))
             .setLayerCount(framebuffer->framebufferInfo.arraySize)
+            .setViewMask(framebuffer->framebufferInfo.viewMask)
             .setColorAttachmentCount(uint32_t(framebuffer->colorAttachments.size()))
             .setPColorAttachments(framebuffer->colorAttachments.data())
             .setPDepthAttachment(framebuffer->depthAttachment.imageView ? &framebuffer->depthAttachment : nullptr)

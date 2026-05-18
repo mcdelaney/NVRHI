@@ -161,6 +161,7 @@ namespace nvrhi
             sampleCount = textureDesc.sampleCount;
             sampleQuality = textureDesc.sampleQuality;
         }
+        viewMask = desc.viewMask;
     }
 
     FramebufferInfoEx::FramebufferInfoEx(const FramebufferDesc& desc)

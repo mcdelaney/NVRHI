@@ -170,7 +170,8 @@ namespace nvrhi::vulkan
             .setColorAttachmentCount(uint32_t(fbinfo.colorFormats.size()))
             .setPColorAttachmentFormats(colorFormats.data())
             .setDepthAttachmentFormat(depthStencilFormatInfo.hasDepth ? depthStencilFormat : vk::Format::eUndefined)
-            .setStencilAttachmentFormat(depthStencilFormatInfo.hasStencil ? depthStencilFormat : vk::Format::eUndefined);
+            .setStencilAttachmentFormat(depthStencilFormatInfo.hasStencil ? depthStencilFormat : vk::Format::eUndefined)
+            .setViewMask(fbinfo.viewMask);
 
         auto pipelineInfo = vk::GraphicsPipelineCreateInfo()
             .setPNext(&renderingInfo)
