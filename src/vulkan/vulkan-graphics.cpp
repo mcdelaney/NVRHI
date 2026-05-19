@@ -496,11 +496,21 @@ namespace nvrhi::vulkan
         m_CurrentGraphicsState.framebuffer = framebuffer;
         m_CurrentMeshletState.framebuffer = framebuffer;
 
+        // Vulkan spec: when viewMask != 0, the layer count is determined by
+        // viewMask (one layer per set bit); the explicit layerCount field is
+        // ignored but must be 0/1 to satisfy validation (see
+        // VUID-VkRenderingInfo-viewMask-...). Passing arraySize=4 with
+        // viewMask=0xF on some drivers gets interpreted as layered rendering
+        // (4 layers of identical output) rather than multiview, which
+        // manifests as "view N's output ends up in all layers" — slices look
+        // like triangle soup because every view's geometry gets duplicated
+        // across all slices instead of routed per-view.
+        const bool is_multiview = framebuffer->framebufferInfo.viewMask != 0;
         vk::RenderingInfo renderingInfo = vk::RenderingInfo()
             .setRenderArea(vk::Rect2D()
                 .setOffset(vk::Offset2D(0, 0))
                 .setExtent(vk::Extent2D(framebuffer->framebufferInfo.width, framebuffer->framebufferInfo.height)))
-            .setLayerCount(framebuffer->framebufferInfo.arraySize)
+            .setLayerCount(is_multiview ? 1u : framebuffer->framebufferInfo.arraySize)
             .setViewMask(framebuffer->framebufferInfo.viewMask)
             .setColorAttachmentCount(uint32_t(framebuffer->colorAttachments.size()))
             .setPColorAttachments(framebuffer->colorAttachments.data())
