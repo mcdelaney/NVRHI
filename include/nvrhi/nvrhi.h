@@ -3154,12 +3154,24 @@ namespace nvrhi
         // If left nullptr, lifetime will be tracked by the device.
         ICommandListLifetimeTracker* lifetimeTracker = nullptr;
 
+        // Vulkan only. When true, pipeline barriers committed on this command
+        // list collapse the conservative ALL_COMMANDS pipeline-stage scope (used
+        // by the ShaderResource / UnorderedAccess / ConstantBuffer states) down
+        // to the COMPUTE_SHADER stage, turning full-pipeline-drain barriers into
+        // compute-only execution dependencies. Access masks and image layouts are
+        // left unchanged. ONLY safe when every access on this command list comes
+        // from compute shaders (e.g. a dedicated compute command list with no
+        // graphics/ray-tracing access to the barriered resources). Default false
+        // preserves the original conservative behavior.
+        bool collapseComputeOnlyBarrierStages = false;
+
         CommandListParameters& setEnableImmediateExecution(bool value) { enableImmediateExecution = value; return *this; }
         CommandListParameters& setUploadChunkSize(size_t value) { uploadChunkSize = value; return *this; }
         CommandListParameters& setScratchChunkSize(size_t value) { scratchChunkSize = value; return *this; }
         CommandListParameters& setScratchMaxMemory(size_t value) { scratchMaxMemory = value; return *this; }
         CommandListParameters& setQueueType(CommandQueue value) { queueType = value; return *this; }
         CommandListParameters& setLifetimeTracker(ICommandListLifetimeTracker* value) { lifetimeTracker = value; return *this; }
+        CommandListParameters& setCollapseComputeOnlyBarrierStages(bool value) { collapseComputeOnlyBarrierStages = value; return *this; }
     };
 
     //////////////////////////////////////////////////////////////////////////

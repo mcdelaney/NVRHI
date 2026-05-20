@@ -193,6 +193,24 @@ namespace nvrhi::vulkan
         std::vector<vk::ImageMemoryBarrier2> imageBarriers;
         std::vector<vk::BufferMemoryBarrier2> bufferBarriers;
 
+        // Opt-in (CommandListParameters::collapseComputeOnlyBarrierStages): on a
+        // command list whose accesses are all from compute shaders, collapse the
+        // conservative ALL_COMMANDS stage scope (emitted by the ShaderResource /
+        // UnorderedAccess / ConstantBuffer states) down to COMPUTE_SHADER. This
+        // turns full-pipeline-drain barriers into compute-only execution
+        // dependencies; access masks and image layouts are left untouched, so the
+        // memory visibility and layout transitions are identical. Other stage
+        // bits (e.g. eTransfer from CopyDest) are preserved as-is.
+        const bool collapseToCompute = m_CommandListParameters.collapseComputeOnlyBarrierStages;
+        auto narrowStages = [collapseToCompute](vk::PipelineStageFlags2 s) -> vk::PipelineStageFlags2 {
+            if (collapseToCompute && (s & vk::PipelineStageFlagBits2::eAllCommands))
+            {
+                s &= ~vk::PipelineStageFlags2(vk::PipelineStageFlagBits2::eAllCommands);
+                s |= vk::PipelineStageFlagBits2::eComputeShader;
+            }
+            return s;
+        };
+
         for (const TextureBarrier& barrier : m_StateTracker.getTextureBarriers())
         {
             ResourceStateMapping before = convertResourceState(barrier.stateBefore, true);
@@ -219,8 +237,8 @@ namespace nvrhi::vulkan
             imageBarriers.push_back(vk::ImageMemoryBarrier2()
                 .setSrcAccessMask(before.accessMask)
                 .setDstAccessMask(after.accessMask)
-                .setSrcStageMask(before.stageFlags)
-                .setDstStageMask(after.stageFlags)
+                .setSrcStageMask(narrowStages(before.stageFlags))
+                .setDstStageMask(narrowStages(after.stageFlags))
                 .setOldLayout(before.imageLayout)
                 .setNewLayout(after.imageLayout)
                 .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
@@ -249,8 +267,8 @@ namespace nvrhi::vulkan
             bufferBarriers.push_back(vk::BufferMemoryBarrier2()
                 .setSrcAccessMask(before.accessMask)
                 .setDstAccessMask(after.accessMask)
-                .setSrcStageMask(before.stageFlags)
-                .setDstStageMask(after.stageFlags)
+                .setSrcStageMask(narrowStages(before.stageFlags))
+                .setDstStageMask(narrowStages(after.stageFlags))
                 .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                 .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                 .setBuffer(buffer->buffer)
