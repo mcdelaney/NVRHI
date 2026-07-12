@@ -211,13 +211,10 @@ namespace nvrhi::vulkan
             }
         }
 
-        std::vector<vk::PipelineStageFlags> waitStageArray(waitSemaphores->size());
-        std::vector<vk::CommandBuffer> commandBuffers(numCmd);
+        assert(waitSemaphores->size() == waitSemaphoreValues->size());
+        assert(signalSemaphores->size() == signalSemaphoreValues->size());
 
-        for (size_t i = 0; i < waitSemaphores->size(); i++)
-        {
-            waitStageArray[i] = vk::PipelineStageFlagBits::eTopOfPipe;
-        }
+        std::vector<vk::CommandBufferSubmitInfo> commandBufferInfos(numCmd);
 
         const uint64_t submissionID = m_LastSubmittedID.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -226,7 +223,9 @@ namespace nvrhi::vulkan
             CommandList* commandList = checked_cast<CommandList*>(ppCmd[i]);
             TrackedCommandBufferPtr commandBuffer = commandList->getCurrentCmdBuf();
 
-            commandBuffers[i] = commandBuffer->cmdBuf;
+            commandBufferInfos[i] = vk::CommandBufferSubmitInfo()
+                .setCommandBuffer(commandBuffer->cmdBuf)
+                .setDeviceMask(0);
             commandBuffer->submissionID = submissionID;
 
             for (const auto& buffer : commandBuffer->referencedStagingBuffers)
@@ -239,28 +238,36 @@ namespace nvrhi::vulkan
         signalSemaphores->push_back(trackingSemaphore);
         signalSemaphoreValues->push_back(submissionID);
 
-        auto timelineSemaphoreInfo = vk::TimelineSemaphoreSubmitInfo()
-            .setSignalSemaphoreValueCount(uint32_t(signalSemaphoreValues->size()))
-            .setPSignalSemaphoreValues(signalSemaphoreValues->data());
-
-        if (!waitSemaphoreValues->empty())
+        std::vector<vk::SemaphoreSubmitInfo> waitInfos(waitSemaphores->size());
+        for (size_t i = 0; i < waitInfos.size(); ++i)
         {
-            timelineSemaphoreInfo.setWaitSemaphoreValueCount(uint32_t(waitSemaphoreValues->size()));
-            timelineSemaphoreInfo.setPWaitSemaphoreValues(waitSemaphoreValues->data());
+            waitInfos[i] = vk::SemaphoreSubmitInfo()
+                .setSemaphore((*waitSemaphores)[i])
+                .setValue((*waitSemaphoreValues)[i])
+                .setStageMask(vk::PipelineStageFlagBits2::eAllCommands)
+                .setDeviceIndex(0);
         }
 
-        auto submitInfo = vk::SubmitInfo()
-            .setPNext(&timelineSemaphoreInfo)
-            .setCommandBufferCount(uint32_t(numCmd))
-            .setPCommandBuffers(commandBuffers.data())
-            .setWaitSemaphoreCount(uint32_t(waitSemaphores->size()))
-            .setPWaitSemaphores(waitSemaphores->empty() ? nullptr : waitSemaphores->data())
-            .setPWaitDstStageMask(waitStageArray.data())
-            .setSignalSemaphoreCount(uint32_t(signalSemaphores->size()))
-            .setPSignalSemaphores(signalSemaphores->empty() ? nullptr : signalSemaphores->data());
+        std::vector<vk::SemaphoreSubmitInfo> signalInfos(signalSemaphores->size());
+        for (size_t i = 0; i < signalInfos.size(); ++i)
+        {
+            signalInfos[i] = vk::SemaphoreSubmitInfo()
+                .setSemaphore((*signalSemaphores)[i])
+                .setValue((*signalSemaphoreValues)[i])
+                .setStageMask(vk::PipelineStageFlagBits2::eAllCommands)
+                .setDeviceIndex(0);
+        }
+
+        auto submitInfo = vk::SubmitInfo2()
+            .setWaitSemaphoreInfoCount(uint32_t(waitInfos.size()))
+            .setPWaitSemaphoreInfos(waitInfos.empty() ? nullptr : waitInfos.data())
+            .setCommandBufferInfoCount(uint32_t(commandBufferInfos.size()))
+            .setPCommandBufferInfos(commandBufferInfos.empty() ? nullptr : commandBufferInfos.data())
+            .setSignalSemaphoreInfoCount(uint32_t(signalInfos.size()))
+            .setPSignalSemaphoreInfos(signalInfos.empty() ? nullptr : signalInfos.data());
 
         try {
-            m_Queue.submit(submitInfo);
+            m_Queue.submit2(submitInfo);
         }
         catch (vk::DeviceLostError&)
         {
