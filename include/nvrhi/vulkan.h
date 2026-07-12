@@ -54,6 +54,12 @@ namespace nvrhi::vulkan
         const VkSemaphore* signalSemaphores = nullptr;
         const uint64_t* signalValues = nullptr;   // 0 for binary, monotonic value for timeline
         uint32_t numSignals = 0;
+        // Optional destination stage for each wait. Null preserves the
+        // conservative behavior and waits at ALL_COMMANDS. Every supplied
+        // mask must be nonzero and supported by the destination queue family.
+        // The caller is also responsible for enabling any Vulkan feature or
+        // extension required by feature-gated stage bits.
+        const VkPipelineStageFlags2* waitStageMasks = nullptr;
     };
 
     class IDevice : public nvrhi::IDevice
@@ -102,6 +108,15 @@ namespace nvrhi::vulkan
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) = 0;
+
+        // Stage-aware variants for waits stored in the queue accumulator.
+        // The existing methods remain conservative and use ALL_COMMANDS.
+        virtual void queueWaitForSemaphoreAtStage(
+            CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value,
+            VkPipelineStageFlags2 waitStageMask) = 0;
+        virtual void queueWaitForCommandListAtStage(
+            CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance,
+            VkPipelineStageFlags2 waitStageMask) = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

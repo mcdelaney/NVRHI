@@ -21,6 +21,7 @@
 */
 
 #include "vulkan-backend.h"
+#include "vulkan-queue-utils.h"
 #include "nvrhi/common/misc.h"
 
 namespace nvrhi::vulkan
@@ -38,6 +39,18 @@ namespace nvrhi::vulkan
         , m_QueueID(queueID)
         , m_QueueFamilyIndex(queueFamilyIndex)
     {
+        const std::vector<vk::QueueFamilyProperties> queueFamilies =
+            context.physicalDevice.getQueueFamilyProperties();
+        if (queueFamilyIndex >= queueFamilies.size())
+        {
+            context.error("The Vulkan queue family index is out of range");
+            assert(false && "Vulkan queue family index is out of range");
+        }
+        else
+        {
+            m_QueueFlags = queueFamilies[queueFamilyIndex].queueFlags;
+        }
+
         auto semaphoreTypeInfo = vk::SemaphoreTypeCreateInfo()
             .setSemaphoreType(vk::SemaphoreType::eTimeline);
 
@@ -100,10 +113,22 @@ namespace nvrhi::vulkan
         return cmdBuf;
     }
 
-    void Queue::addWaitSemaphore(vk::Semaphore semaphore, uint64_t value)
+    vk::PipelineStageFlags2 Queue::normalizeWaitStageMask(vk::PipelineStageFlags2 stageMask) const
+    {
+        if (detail::isWaitStageMaskSupported(stageMask, m_QueueFlags))
+            return stageMask;
+
+        m_Context.error("A Vulkan semaphore wait stage mask is zero or unsupported by the destination queue family");
+        assert(false && "Invalid Vulkan semaphore wait stage mask");
+        return vk::PipelineStageFlagBits2::eAllCommands;
+    }
+
+    void Queue::addWaitSemaphore(vk::Semaphore semaphore, uint64_t value, vk::PipelineStageFlags2 stageMask)
     {
         if (!semaphore)
             return;
+
+        stageMask = normalizeWaitStageMask(stageMask);
 
         // Lock so concurrent submitters from different threads don't race
         // on the wait/signal accumulator vectors. The mutex is the same
@@ -111,8 +136,7 @@ namespace nvrhi::vulkan
         // the subsequent submit are logically a single transaction for
         // any given submitter.
         std::lock_guard lockGuard(m_Mutex);
-        m_WaitSemaphores.push_back(semaphore);
-        m_WaitSemaphoreValues.push_back(value);
+        m_WaitSemaphores.push_back(PendingSemaphoreWait{ semaphore, value, stageMask });
     }
 
     void Queue::addSignalSemaphore(vk::Semaphore semaphore, uint64_t value)
@@ -170,38 +194,41 @@ namespace nvrhi::vulkan
         //     present_sem signal, or terrain-front-use signals queued by
         //     the render thread for its own tail submit). Solves the
         //     "accumulator stealing" race.
-        std::vector<vk::Semaphore> localWaitSemaphores;
-        std::vector<uint64_t> localWaitSemaphoreValues;
+        std::vector<PendingSemaphoreWait> localWaitSemaphores;
         std::vector<vk::Semaphore> localSignalSemaphores;
         std::vector<uint64_t> localSignalSemaphoreValues;
 
-        std::vector<vk::Semaphore>* waitSemaphores;
-        std::vector<uint64_t>* waitSemaphoreValues;
+        std::vector<PendingSemaphoreWait>* waitSemaphores;
         std::vector<vk::Semaphore>* signalSemaphores;
         std::vector<uint64_t>* signalSemaphoreValues;
 
         if (drainAccumulator)
         {
             waitSemaphores = &m_WaitSemaphores;
-            waitSemaphoreValues = &m_WaitSemaphoreValues;
             signalSemaphores = &m_SignalSemaphores;
             signalSemaphoreValues = &m_SignalSemaphoreValues;
         }
         else
         {
             waitSemaphores = &localWaitSemaphores;
-            waitSemaphoreValues = &localWaitSemaphoreValues;
             signalSemaphores = &localSignalSemaphores;
             signalSemaphoreValues = &localSignalSemaphoreValues;
         }
 
         if (extras)
         {
+            assert(extras->numWaits == 0 || extras->waitSemaphores != nullptr);
+            assert(extras->numSignals == 0 || extras->signalSemaphores != nullptr);
             for (uint32_t i = 0; i < extras->numWaits; ++i)
             {
-                waitSemaphores->push_back(vk::Semaphore(extras->waitSemaphores[i]));
-                waitSemaphoreValues->push_back(extras->waitValues
-                    ? extras->waitValues[i] : 0ull);
+                const vk::PipelineStageFlags2 stageMask = normalizeWaitStageMask(
+                    extras->waitStageMasks
+                        ? vk::PipelineStageFlags2(extras->waitStageMasks[i])
+                        : vk::PipelineStageFlagBits2::eAllCommands);
+                waitSemaphores->push_back(PendingSemaphoreWait{
+                    vk::Semaphore(extras->waitSemaphores[i]),
+                    extras->waitValues ? extras->waitValues[i] : 0ull,
+                    stageMask });
             }
             for (uint32_t i = 0; i < extras->numSignals; ++i)
             {
@@ -211,7 +238,6 @@ namespace nvrhi::vulkan
             }
         }
 
-        assert(waitSemaphores->size() == waitSemaphoreValues->size());
         assert(signalSemaphores->size() == signalSemaphoreValues->size());
 
         std::vector<vk::CommandBufferSubmitInfo> commandBufferInfos(numCmd);
@@ -242,9 +268,9 @@ namespace nvrhi::vulkan
         for (size_t i = 0; i < waitInfos.size(); ++i)
         {
             waitInfos[i] = vk::SemaphoreSubmitInfo()
-                .setSemaphore((*waitSemaphores)[i])
-                .setValue((*waitSemaphoreValues)[i])
-                .setStageMask(vk::PipelineStageFlagBits2::eAllCommands)
+                .setSemaphore((*waitSemaphores)[i].semaphore)
+                .setValue((*waitSemaphores)[i].value)
+                .setStageMask((*waitSemaphores)[i].stageMask)
                 .setDeviceIndex(0);
         }
 
@@ -277,7 +303,6 @@ namespace nvrhi::vulkan
         if (drainAccumulator)
         {
             m_WaitSemaphores.clear();
-            m_WaitSemaphoreValues.clear();
             m_SignalSemaphores.clear();
             m_SignalSemaphoreValues.clear();
         }
@@ -437,9 +462,17 @@ namespace nvrhi::vulkan
 
     void Device::queueWaitForSemaphore(CommandQueue waitQueueID, VkSemaphore semaphore, uint64_t value)
     {
+        queueWaitForSemaphoreAtStage(
+            waitQueueID, semaphore, value, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    }
+
+    void Device::queueWaitForSemaphoreAtStage(
+        CommandQueue waitQueueID, VkSemaphore semaphore, uint64_t value,
+        VkPipelineStageFlags2 waitStageMask)
+    {
         Queue& waitQueue = *m_Queues[uint32_t(waitQueueID)];
 
-        waitQueue.addWaitSemaphore(semaphore, value);
+        waitQueue.addWaitSemaphore(semaphore, value, vk::PipelineStageFlags2(waitStageMask));
     }
 
     void Device::queueSignalSemaphore(CommandQueue executionQueueID, VkSemaphore semaphore, uint64_t value)
@@ -451,7 +484,16 @@ namespace nvrhi::vulkan
 
     void Device::queueWaitForCommandList(CommandQueue waitQueueID, CommandQueue executionQueueID, uint64_t instance)
     {
-        queueWaitForSemaphore(waitQueueID, getQueueSemaphore(executionQueueID), instance);
+        queueWaitForCommandListAtStage(
+            waitQueueID, executionQueueID, instance, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    }
+
+    void Device::queueWaitForCommandListAtStage(
+        CommandQueue waitQueueID, CommandQueue executionQueueID, uint64_t instance,
+        VkPipelineStageFlags2 waitStageMask)
+    {
+        queueWaitForSemaphoreAtStage(
+            waitQueueID, getQueueSemaphore(executionQueueID), instance, waitStageMask);
     }
 
     void Device::updateTextureTileMappings(ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue)

@@ -37,6 +37,11 @@ option(NVRHI_WITH_VALIDATION "Build NVRHI the validation layer" ON)
 option(NVRHI_WITH_VULKAN "Build the NVRHI Vulkan backend" ON)
 option(NVRHI_WITH_RTXMU "Use RTXMU for acceleration structure management" OFF)
 option(NVRHI_WITH_AFTERMATH "Include Aftermath support (requires NSight Aftermath SDK)" OFF)
+option(NVRHI_BUILD_TESTS "Build NVRHI integration tests" OFF)
+
+if (NVRHI_BUILD_TESTS AND NVRHI_WITH_VULKAN)
+    find_package(Vulkan REQUIRED)
+endif()
 
 cmake_dependent_option(NVRHI_WITH_NVAPI "Include NVAPI support (requires NVAPI SDK)" OFF "WIN32" OFF)
 cmake_dependent_option(NVRHI_WITH_DX11 "Build the NVRHI D3D11 backend" ON "WIN32" OFF)
@@ -180,6 +185,7 @@ set(src_vk
     src/vulkan/vulkan-meshlets.cpp
     src/vulkan/vulkan-queries.cpp
     src/vulkan/vulkan-queue.cpp
+    src/vulkan/vulkan-queue-utils.h
     src/vulkan/vulkan-raytracing.cpp
     src/vulkan/vulkan-resource-bindings.cpp
     src/vulkan/vulkan-shader.cpp
@@ -388,4 +394,9 @@ if (NVRHI_INSTALL)
             EXPORT_LINK_INTERFACE_LIBRARIES
             DESTINATION "${nvrhi_CONFIG_PATH}")
     endif()
+endif()
+
+if (NVRHI_BUILD_TESTS AND NVRHI_WITH_VULKAN)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

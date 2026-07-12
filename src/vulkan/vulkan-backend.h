@@ -234,7 +234,9 @@ namespace nvrhi::vulkan
 
         TrackedCommandBufferPtr getOrCreateCommandBuffer();
 
-        void addWaitSemaphore(vk::Semaphore semaphore, uint64_t value);
+        void addWaitSemaphore(
+            vk::Semaphore semaphore, uint64_t value,
+            vk::PipelineStageFlags2 stageMask = vk::PipelineStageFlagBits2::eAllCommands);
         void addSignalSemaphore(vk::Semaphore semaphore, uint64_t value);
 
         // submits a command buffer to this queue, returns submissionID
@@ -261,6 +263,14 @@ namespace nvrhi::vulkan
         uint64_t submitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
 
     private:
+        struct PendingSemaphoreWait
+        {
+            vk::Semaphore semaphore;
+            uint64_t value = 0;
+            vk::PipelineStageFlags2 stageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        };
+
+        vk::PipelineStageFlags2 normalizeWaitStageMask(vk::PipelineStageFlags2 stageMask) const;
         uint64_t submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator);
     public:
 
@@ -297,14 +307,14 @@ namespace nvrhi::vulkan
         vk::Queue m_Queue;
         CommandQueue m_QueueID;
         uint32_t m_QueueFamilyIndex = uint32_t(-1);
+        vk::QueueFlags m_QueueFlags;
 
         // Protects vk::Queue.submit (Vulkan VkQueue external-sync
         // requirement), the wait/signal accumulator vectors, and the
         // m_CommandBuffersPool free-list. Concurrent submitters from
         // different threads serialize on this mutex.
         std::mutex m_Mutex;
-        std::vector<vk::Semaphore> m_WaitSemaphores;
-        std::vector<uint64_t> m_WaitSemaphoreValues;
+        std::vector<PendingSemaphoreWait> m_WaitSemaphores;
         std::vector<vk::Semaphore> m_SignalSemaphores;
         std::vector<uint64_t> m_SignalSemaphoreValues;
 
@@ -1269,6 +1279,12 @@ namespace nvrhi::vulkan
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) override;
+        void queueWaitForSemaphoreAtStage(
+            CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value,
+            VkPipelineStageFlags2 waitStageMask) override;
+        void queueWaitForCommandListAtStage(
+            CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance,
+            VkPipelineStageFlags2 waitStageMask) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
