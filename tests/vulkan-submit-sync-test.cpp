@@ -270,10 +270,10 @@ int main()
     nvrhiDesc.device = vkDevice;
     nvrhiDesc.graphicsQueue = queue;
     nvrhiDesc.graphicsQueueIndex = int(queueFamilyIndex);
-    // Three logical NVRHI queues are sufficient for the submission and
-    // lifetime contracts under test. Sharing one VkQueue keeps this test
-    // portable to devices that expose only one queue in the graphics family;
-    // all operations are submitted serially from this thread.
+    // Bind all three logical queues to one physical VkQueue. Besides keeping
+    // the test portable to devices with only one graphics-family queue, this
+    // verifies that NVRHI aliases the physical queue's synchronization and
+    // lifetime state instead of constructing three independent wrappers.
     nvrhiDesc.computeQueue = queue;
     nvrhiDesc.computeQueueIndex = int(queueFamilyIndex);
     nvrhiDesc.transferQueue = queue;
@@ -305,6 +305,32 @@ int main()
         return semaphore;
     };
 
+    const VkSemaphore graphicsTracking = device->getQueueSemaphore(nvrhi::CommandQueue::Graphics);
+    const VkSemaphore computeTracking = device->getQueueSemaphore(nvrhi::CommandQueue::Compute);
+    const VkSemaphore copyTracking = device->getQueueSemaphore(nvrhi::CommandQueue::Copy);
+    passed &= graphicsTracking != VK_NULL_HANDLE
+        && graphicsTracking == computeTracking
+        && graphicsTracking == copyTracking;
+    passed &= &device->getQueueMutex(nvrhi::CommandQueue::Graphics)
+            == &device->getQueueMutex(nvrhi::CommandQueue::Compute)
+        && &device->getQueueMutex(nvrhi::CommandQueue::Graphics)
+            == &device->getQueueMutex(nvrhi::CommandQueue::Copy);
+
+    VkSemaphore aliasCompletion = timeline();
+    auto signalOnQueue = [&](nvrhi::CommandQueue queueType, uint64_t value) {
+        nvrhi::vulkan::SubmitSyncExtras extras {};
+        extras.signalSemaphores = &aliasCompletion;
+        extras.signalValues = &value;
+        extras.numSignals = 1;
+        return device->executeCommandListsWithSyncIsolated(nullptr, 0, queueType, extras);
+    };
+    const uint64_t graphicsId = signalOnQueue(nvrhi::CommandQueue::Graphics, 1);
+    const uint64_t computeId = signalOnQueue(nvrhi::CommandQueue::Compute, 2);
+    const uint64_t aliasCopyId = signalOnQueue(nvrhi::CommandQueue::Copy, 3);
+    passed &= computeId == graphicsId + 1 && aliasCopyId == computeId + 1;
+    passed &= waitTimeline(vkDevice, aliasCompletion, 3);
+    passed &= waitTimeline(vkDevice, graphicsTracking, aliasCopyId);
+
     VkSemaphore completion = timeline();
     auto isolatedSignal = [&](VkSemaphore semaphore, uint64_t value) {
         nvrhi::vulkan::SubmitSyncExtras extras {};
@@ -315,12 +341,14 @@ int main()
             nullptr, 0, nvrhi::CommandQueue::Graphics, extras);
     };
 
-    uint64_t previousId = isolatedSignal(completion, 1);
-    passed &= waitTimeline(vkDevice, completion, 1);
+    uint64_t previousId = aliasCopyId;
+    uint64_t id = isolatedSignal(completion, 1);
+    passed &= id > previousId && waitTimeline(vkDevice, completion, 1);
+    previousId = id;
 
     VkSemaphore accumulated = timeline();
     device->queueSignalSemaphore(nvrhi::CommandQueue::Graphics, accumulated, 1);
-    uint64_t id = isolatedSignal(completion, 2);
+    id = isolatedSignal(completion, 2);
     passed &= id > previousId && waitTimeline(vkDevice, completion, 2);
     previousId = id;
     passed &= timelineValue(vkDevice, accumulated) == 0;
@@ -532,6 +560,7 @@ int main()
     bufferA = nullptr;
     bufferB = nullptr;
     readback = nullptr;
+    device->runGarbageCollection();
     device->runGarbageCollection();
     device = nullptr;
     for (VkSemaphore semaphore : semaphores)

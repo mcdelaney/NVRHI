@@ -55,30 +55,43 @@ namespace nvrhi::vulkan
         , m_Allocator(m_Context)
         , m_TimerQueryAllocator(desc.maxTimerQueries, true)
     {
-        if (desc.graphicsQueue)
+        // NVRHI exposes logical Graphics/Compute/Copy queues, but applications
+        // are allowed to bind more than one of those labels to the same Vulkan
+        // queue. There must be exactly one Queue wrapper per physical queue:
+        // VkQueue host access is externally synchronized, and the wrapper owns
+        // the mutex and all submission/lifetime state that provides that
+        // synchronization.
+        auto addQueue = [&](CommandQueue queueID, VkQueue vkQueue, int queueFamilyIndex)
         {
-            m_Queues[uint32_t(CommandQueue::Graphics)] = std::make_unique<Queue>(m_Context,
-                CommandQueue::Graphics, desc.graphicsQueue, desc.graphicsQueueIndex);
-        }
+            if (!vkQueue)
+                return;
 
-        if (desc.computeQueue)
-        {
-            m_Queues[uint32_t(CommandQueue::Compute)] = std::make_unique<Queue>(m_Context,
-                CommandQueue::Compute, desc.computeQueue, desc.computeQueueIndex);
-        }
+            const vk::Queue queue(vkQueue);
+            for (const std::shared_ptr<Queue>& existing : m_Queues)
+            {
+                if (existing
+                    && existing->getVkQueue() == queue
+                    && existing->getQueueFamilyIndex() == uint32_t(queueFamilyIndex))
+                {
+                    m_Queues[uint32_t(queueID)] = existing;
+                    return;
+                }
+            }
 
-        if (desc.transferQueue)
-        {
-            m_Queues[uint32_t(CommandQueue::Copy)] = std::make_unique<Queue>(m_Context,
-                CommandQueue::Copy, desc.transferQueue, desc.transferQueueIndex);
-        }
+            m_Queues[uint32_t(queueID)] = std::make_shared<Queue>(
+                m_Context, queueID, queue, queueFamilyIndex);
+        };
 
-        // Each queue owns a default lifetime tracker. CLs created without a
+        addQueue(CommandQueue::Graphics, desc.graphicsQueue, desc.graphicsQueueIndex);
+        addQueue(CommandQueue::Compute, desc.computeQueue, desc.computeQueueIndex);
+        addQueue(CommandQueue::Copy, desc.transferQueue, desc.transferQueueIndex);
+
+        // Each physical queue owns one default lifetime tracker. CLs created without a
         // per-CL tracker fall back to the queue's default. Mirrors D3D12
         // backend's per-Queue Queue::lifetimeTracker (PR #119).
         for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
         {
-            if (m_Queues[i])
+            if (m_Queues[i] && !m_Queues[i]->defaultLifetimeTracker)
             {
                 m_Queues[i]->defaultLifetimeTracker = createCommandListLifetimeTracker(
                     static_cast<CommandQueue>(i));
@@ -355,14 +368,27 @@ namespace nvrhi::vulkan
 
     void Device::runGarbageCollection()
     {
-        // Drive each queue's default lifetime tracker. Per-CL trackers
+        // Drive each physical queue's default lifetime tracker once. Per-CL trackers
         // (set via CommandListParameters::lifetimeTracker) are owned by
         // the application and must be driven on the application's schedule
         // — typically the same thread that submits CLs through them.
+        std::array<Queue*, uint32_t(CommandQueue::Count)> visitedQueues {};
+        uint32_t numVisitedQueues = 0;
         for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
         {
-            if (m_Queues[i] && m_Queues[i]->defaultLifetimeTracker)
-                m_Queues[i]->defaultLifetimeTracker->runGarbageCollection();
+            Queue* queue = m_Queues[i].get();
+            if (!queue || !queue->defaultLifetimeTracker)
+                continue;
+
+            bool visited = false;
+            for (uint32_t j = 0; j < numVisitedQueues; ++j)
+                if (visitedQueues[j] == queue) { visited = true; break; }
+
+            if (!visited)
+            {
+                visitedQueues[numVisitedQueues++] = queue;
+                queue->defaultLifetimeTracker->runGarbageCollection();
+            }
         }
     }
 

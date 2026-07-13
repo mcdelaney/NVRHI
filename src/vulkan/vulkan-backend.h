@@ -1300,8 +1300,12 @@ namespace nvrhi::vulkan
 
         std::mutex m_Mutex;
 
-        // array of submission queues
-        std::array<std::unique_ptr<Queue>, uint32_t(CommandQueue::Count)> m_Queues;
+        // Logical submission queue slots; entries may share a physical queue.
+        // Logical queues may alias one physical Vulkan queue. Sharing the Queue
+        // wrapper is required because its mutex, submission counter, tracking
+        // semaphore, command-buffer pool and lifetime tracker all belong to the
+        // physical VkQueue rather than to an NVRHI CommandQueue label.
+        std::array<std::shared_ptr<Queue>, uint32_t(CommandQueue::Count)> m_Queues;
 
         // Unique queue family indices across all configured queues, computed
         // once after the queues are constructed. Used to populate
