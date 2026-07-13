@@ -320,6 +320,136 @@ int main()
         return 1;
 
     bool passed = true;
+
+    // Binding-set cache identity must include both descriptor-array placement
+    // and the per-item implicit-transition policy.
+    {
+        const nvrhi::BindingSetItem defaultItem =
+            nvrhi::BindingSetItem::Texture_SRV(3, nullptr);
+        nvrhi::BindingSetItem optedOutItem = defaultItem;
+        optedOutItem.setEnableAutomaticTransitions(false);
+        nvrhi::BindingSetItem arrayItem = defaultItem;
+        arrayItem.setArrayElement(1);
+
+        const std::hash<nvrhi::BindingSetItem> itemHash {};
+        const bool itemIdentityPassed = defaultItem.enableAutomaticTransitions
+            && !optedOutItem.enableAutomaticTransitions
+            && defaultItem != optedOutItem
+            && itemHash(defaultItem) != itemHash(optedOutItem)
+            && defaultItem != arrayItem
+            && itemHash(defaultItem) != itemHash(arrayItem);
+        passed &= itemIdentityPassed;
+        if (!itemIdentityPassed)
+            std::cerr << "BindingSetItem transition/array identity test failed\n";
+    }
+
+    // Opting a UAV out of implicit transitions also opts it out of the
+    // repeated UAV-barrier fast path, without removing its transition index
+    // from the explicit setResourceStatesForBindingSet path.
+    {
+        nvrhi::BufferDesc bufferDesc {};
+        bufferDesc.byteSize = 16;
+        bufferDesc.structStride = sizeof(uint32_t);
+        bufferDesc.canHaveUAVs = true;
+        bufferDesc.debugName = "BindingTransitionPolicyTest";
+        nvrhi::BufferHandle buffer = device->createBuffer(bufferDesc);
+
+        nvrhi::BindingLayoutDesc layoutDesc {};
+        layoutDesc.visibility = nvrhi::ShaderType::Compute;
+        layoutDesc.bindings = {
+            nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0)
+        };
+        nvrhi::BindingLayoutHandle layout = device->createBindingLayout(layoutDesc);
+
+        const nvrhi::BindingSetItem automaticItem =
+            nvrhi::BindingSetItem::StructuredBuffer_UAV(0, buffer);
+        nvrhi::BindingSetItem optedOutItem = automaticItem;
+        optedOutItem.setEnableAutomaticTransitions(false);
+
+        nvrhi::BindingSetDesc automaticDesc {};
+        automaticDesc.bindings = { automaticItem };
+        nvrhi::BindingSetDesc optedOutDesc {};
+        optedOutDesc.bindings = { optedOutItem };
+        nvrhi::BindingSetHandle automaticSet;
+        nvrhi::BindingSetHandle optedOutSet;
+        if (buffer && layout)
+        {
+            automaticSet = device->createBindingSet(automaticDesc, layout);
+            optedOutSet = device->createBindingSet(optedOutDesc, layout);
+        }
+
+        bool uavPolicyPassed = bool(buffer) && bool(layout)
+            && bool(automaticSet) && bool(optedOutSet);
+        if (uavPolicyPassed)
+        {
+            const auto* automaticVkSet =
+                static_cast<const nvrhi::vulkan::BindingSet*>(automaticSet.Get());
+            const auto* optedOutVkSet =
+                static_cast<const nvrhi::vulkan::BindingSet*>(optedOutSet.Get());
+            uavPolicyPassed = automaticVkSet->hasUavBindings
+                && !optedOutVkSet->hasUavBindings
+                && automaticVkSet->bindingsThatNeedTransitions.size() == 1
+                && optedOutVkSet->bindingsThatNeedTransitions.size() == 1;
+        }
+        passed &= uavPolicyPassed;
+        if (!uavPolicyPassed)
+            std::cerr << "BindingSetItem implicit UAV-transition policy test failed\n";
+    }
+
+    // The opt-in policy changes only the Vulkan image layout. State-derived
+    // stage and access masks are still supplied by convertResourceState and
+    // are covered by the validation-backed transfer test below.
+    nvrhi::TextureDesc defaultLayoutDesc {};
+    nvrhi::TextureDesc generalLayoutDesc {};
+    generalLayoutDesc.useGeneralLayout = true;
+    struct LayoutCase
+    {
+        nvrhi::ResourceStates state;
+        vk::ImageLayout defaultLayout;
+        vk::ImageLayout generalLayout;
+    };
+    const std::array<LayoutCase, 11> layoutCases {{
+        { nvrhi::ResourceStates::ShaderResource,
+            vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::UnorderedAccess,
+            vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::CopySource,
+            vk::ImageLayout::eTransferSrcOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::CopyDest,
+            vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::ResolveSource,
+            vk::ImageLayout::eTransferSrcOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::ResolveDest,
+            vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::RenderTarget,
+            vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::DepthWrite,
+            vk::ImageLayout::eDepthStencilAttachmentOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::DepthRead,
+            vk::ImageLayout::eDepthStencilReadOnlyOptimal, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::ShadingRateSurface,
+            vk::ImageLayout::eFragmentShadingRateAttachmentOptimalKHR, vk::ImageLayout::eGeneral },
+        { nvrhi::ResourceStates::Present,
+            vk::ImageLayout::ePresentSrcKHR, vk::ImageLayout::ePresentSrcKHR },
+    }};
+    for (const LayoutCase& layoutCase : layoutCases)
+    {
+        const vk::ImageLayout defaultLayout =
+            nvrhi::vulkan::convertTextureLayout(layoutCase.state, defaultLayoutDesc);
+        const vk::ImageLayout generalLayout =
+            nvrhi::vulkan::convertTextureLayout(layoutCase.state, generalLayoutDesc);
+        const bool casePassed = defaultLayout == layoutCase.defaultLayout
+            && generalLayout == layoutCase.generalLayout;
+        passed &= casePassed;
+        if (!casePassed)
+            std::cerr << "GENERAL-layout state mapping test failed\n";
+    }
+    passed &= nvrhi::vulkan::convertTextureLayout(
+        nvrhi::ResourceStates::Common, generalLayoutDesc) == vk::ImageLayout::eUndefined;
+    passed &= nvrhi::vulkan::convertTextureLayout(
+        nvrhi::ResourceStates::ShaderResource | nvrhi::ResourceStates::UnorderedAccess,
+        generalLayoutDesc) == vk::ImageLayout::eGeneral;
+
     std::vector<VkSemaphore> semaphores;
     auto timeline = [&](uint64_t initialValue = 0) {
         VkSemaphore semaphore = createSemaphore(vkDevice, true, initialValue);
@@ -723,6 +853,103 @@ int main()
         passed &= computeReuseId > copyReuseId;
         passed &= waitTimeline(vkDevice, uploadReuseTimeline, uploadReuseValue2);
         previousId = computeReuseId;
+    }
+
+    // Exercise every transfer direction used by streaming textures while the
+    // images remain in GENERAL: staging upload -> image -> image -> staging
+    // readback. Synchronization validation catches any command/layout mismatch,
+    // and the texel comparison proves that the commands executed successfully.
+    {
+        constexpr uint32_t textureWidth = 4;
+        constexpr uint32_t textureHeight = 4;
+        constexpr std::array<uint32_t, textureWidth * textureHeight> expectedTexels {{
+            0x01020304u, 0x11121314u, 0x21222324u, 0x31323334u,
+            0x41424344u, 0x51525354u, 0x61626364u, 0x71727374u,
+            0x81828384u, 0x91929394u, 0xa1a2a3a4u, 0xb1b2b3b4u,
+            0xc1c2c3c4u, 0xd1d2d3d4u, 0xe1e2e3e4u, 0xf1f2f3f4u,
+        }};
+
+        nvrhi::TextureDesc textureDesc {};
+        textureDesc.width = textureWidth;
+        textureDesc.height = textureHeight;
+        textureDesc.format = nvrhi::Format::R32_UINT;
+        textureDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+        textureDesc.keepInitialState = true;
+        textureDesc.sharedAcrossQueues = true;
+        textureDesc.useGeneralLayout = true;
+        textureDesc.debugName = "GeneralLayoutTransferSource";
+        nvrhi::TextureHandle sourceTexture = device->createTexture(textureDesc);
+        textureDesc.debugName = "GeneralLayoutTransferDestination";
+        nvrhi::TextureHandle destinationTexture = device->createTexture(textureDesc);
+        textureDesc.debugName = "GeneralLayoutUploadStaging";
+        nvrhi::StagingTextureHandle uploadTexture = device->createStagingTexture(
+            textureDesc, nvrhi::CpuAccessMode::Write);
+        textureDesc.debugName = "GeneralLayoutReadbackStaging";
+        nvrhi::StagingTextureHandle readbackTexture = device->createStagingTexture(
+            textureDesc, nvrhi::CpuAccessMode::Read);
+        nvrhi::CommandListHandle layoutCommandList = device->createCommandList(
+            nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Copy));
+
+        const bool resourcesCreated = sourceTexture && destinationTexture
+            && uploadTexture && readbackTexture && layoutCommandList;
+        passed &= resourcesCreated;
+        if (resourcesCreated)
+        {
+            const nvrhi::TextureSlice wholeTexture {};
+            size_t uploadRowPitch = 0;
+            void* uploadData = device->mapStagingTexture(
+                uploadTexture, wholeTexture, nvrhi::CpuAccessMode::Write, &uploadRowPitch);
+            passed &= uploadData != nullptr && uploadRowPitch >= textureWidth * sizeof(uint32_t);
+            if (uploadData)
+            {
+                for (uint32_t row = 0; row < textureHeight; ++row)
+                {
+                    std::memcpy(
+                        static_cast<uint8_t*>(uploadData) + row * uploadRowPitch,
+                        expectedTexels.data() + row * textureWidth,
+                        textureWidth * sizeof(uint32_t));
+                }
+                device->unmapStagingTexture(uploadTexture);
+            }
+
+            if (uploadData)
+            {
+                layoutCommandList->open();
+                layoutCommandList->copyTexture(
+                    sourceTexture, wholeTexture, uploadTexture, wholeTexture);
+                layoutCommandList->copyTexture(
+                    destinationTexture, wholeTexture, sourceTexture, wholeTexture);
+                layoutCommandList->copyTexture(
+                    readbackTexture, wholeTexture, destinationTexture, wholeTexture);
+                layoutCommandList->close();
+
+                nvrhi::ICommandList* layoutCommandListPtr = layoutCommandList.Get();
+                const uint64_t layoutSubmitId = device->executeCommandListsWithSyncIsolated(
+                    &layoutCommandListPtr, 1, nvrhi::CommandQueue::Copy, emptyExtras);
+                passed &= layoutSubmitId != 0;
+                passed &= waitTimeline(
+                    vkDevice,
+                    device->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+                    layoutSubmitId);
+
+                size_t readbackRowPitch = 0;
+                void* readbackData = device->mapStagingTexture(
+                    readbackTexture, wholeTexture, nvrhi::CpuAccessMode::Read, &readbackRowPitch);
+                passed &= readbackData != nullptr
+                    && readbackRowPitch >= textureWidth * sizeof(uint32_t);
+                if (readbackData)
+                {
+                    for (uint32_t row = 0; row < textureHeight; ++row)
+                    {
+                        passed &= std::memcmp(
+                            static_cast<const uint8_t*>(readbackData) + row * readbackRowPitch,
+                            expectedTexels.data() + row * textureWidth,
+                            textureWidth * sizeof(uint32_t)) == 0;
+                    }
+                    device->unmapStagingTexture(readbackTexture);
+                }
+            }
+        }
     }
 
     // Exercise the raw timer range API against an actual Vulkan timestamp

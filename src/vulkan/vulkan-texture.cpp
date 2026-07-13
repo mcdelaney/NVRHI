@@ -487,8 +487,9 @@ namespace nvrhi::vulkan
         }
         commitBarriers();
 
-        m_CurrentCmdBuf->cmdBuf.copyImage(src->image, vk::ImageLayout::eTransferSrcOptimal,
-                              dst->image, vk::ImageLayout::eTransferDstOptimal,
+        m_CurrentCmdBuf->cmdBuf.copyImage(
+                              src->image, convertTextureLayout(ResourceStates::CopySource, src->desc),
+                              dst->image, convertTextureLayout(ResourceStates::CopyDest, dst->desc),
                               { imageCopy });
     }
 
@@ -569,7 +570,7 @@ namespace nvrhi::vulkan
         m_CurrentCmdBuf->referencedResources.push_back(dest);
 
         m_CurrentCmdBuf->cmdBuf.copyBufferToImage(uploadBuffer->buffer,
-            dest->image, vk::ImageLayout::eTransferDstOptimal,
+            dest->image, convertTextureLayout(ResourceStates::CopyDest, dest->desc),
             1, &imageCopy);
     }
 
@@ -613,7 +614,9 @@ namespace nvrhi::vulkan
         }
         commitBarriers();
 
-        m_CurrentCmdBuf->cmdBuf.resolveImage(src->image, vk::ImageLayout::eTransferSrcOptimal, dest->image, vk::ImageLayout::eTransferDstOptimal, regions);
+        m_CurrentCmdBuf->cmdBuf.resolveImage(
+            src->image, convertTextureLayout(ResourceStates::ResolveSource, src->desc),
+            dest->image, convertTextureLayout(ResourceStates::ResolveDest, dest->desc), regions);
     }
 
     void CommandList::clearTexture(ITexture* _texture, TextureSubresourceSet subresources, const vk::ClearColorValue& clearValue)
@@ -641,7 +644,7 @@ namespace nvrhi::vulkan
             .setLevelCount(subresources.numMipLevels);
         
         m_CurrentCmdBuf->cmdBuf.clearColorImage(texture->image,
-            vk::ImageLayout::eTransferDstOptimal,
+            convertTextureLayout(ResourceStates::CopyDest, texture->desc),
             &clearValue,
             1, &subresourceRange);
     }
@@ -692,7 +695,7 @@ namespace nvrhi::vulkan
 
         auto clearValue = vk::ClearDepthStencilValue(depth, uint32_t(stencil));
         m_CurrentCmdBuf->cmdBuf.clearDepthStencilImage(texture->image,
-            vk::ImageLayout::eTransferDstOptimal,
+            convertTextureLayout(ResourceStates::CopyDest, texture->desc),
             &clearValue,
             1, &subresourceRange);
     }

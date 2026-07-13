@@ -64,7 +64,7 @@ namespace nvrhi
 {
     // Version of the public API provided by NVRHI.
     // Increment this when any changes to the API are made.
-    static constexpr uint32_t c_HeaderVersion = 23;
+    static constexpr uint32_t c_HeaderVersion = 25;
 
     // Verifies that the version of the implementation matches the version of the header.
     // Returns true if they match. Use this when initializing apps using NVRHI as a shared library.
@@ -440,6 +440,13 @@ namespace nvrhi
         // whatever the creator chose.
         bool sharedAcrossQueues = false;
 
+        // Vulkan only: keeps every concrete, non-presentation image state in
+        // VK_IMAGE_LAYOUT_GENERAL. This is useful when disjoint subresources
+        // are accessed concurrently through stable, overlapping image views.
+        // Access masks and pipeline stages are unchanged, and explicit memory
+        // dependencies are still required. Ignored by other backends.
+        bool useGeneralLayout = false;
+
         // Indicates that the texture is created with no backing memory,
         // and memory is bound to the texture later using bindTextureMemory.
         // On DX12, the texture resource is created at the time of memory binding.
@@ -476,6 +483,7 @@ namespace nvrhi
         constexpr TextureDesc& setKeepInitialState(bool value) { keepInitialState = value; return *this; }
         constexpr TextureDesc& setSharedResourceFlags(SharedResourceFlags value) { sharedResourceFlags = value; return *this; }
         constexpr TextureDesc& setSharedAcrossQueues(bool value) { sharedAcrossQueues = value; return *this; }
+        constexpr TextureDesc& setUseGeneralLayout(bool value) { useGeneralLayout = value; return *this; }
         
         // Equivalent to .setInitialState(_initialState).setKeepInitialState(true)
         constexpr TextureDesc& enableAutomaticStateTracking(ResourceStates _initialState)
@@ -2130,7 +2138,11 @@ namespace nvrhi
         ResourceType type          : 8;
         TextureDimension dimension : 8; // valid for Texture_SRV, Texture_UAV
         Format format              : 8; // valid for Texture_SRV, Texture_UAV, Buffer_SRV, Buffer_UAV
-        uint8_t unused             : 8;
+        // Vulkan only: controls implicit resource-state transitions performed when this
+        // item is bound. Explicit ICommandList::setResourceStatesForBindingSet calls
+        // still transition it. Ignored by other backends.
+        uint8_t enableAutomaticTransitions : 1;
+        uint8_t unused                     : 7;
 
         uint32_t unused2; // padding
 
@@ -2149,9 +2161,11 @@ namespace nvrhi
         {
             return resourceHandle == b.resourceHandle
                 && slot == b.slot
+                && arrayElement == b.arrayElement
                 && type == b.type
                 && dimension == b.dimension
                 && format == b.format
+                && enableAutomaticTransitions == b.enableAutomaticTransitions
                 && rawData[0] == b.rawData[0]
                 && rawData[1] == b.rawData[1];
         }
@@ -2178,6 +2192,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.rawData[0] = 0;
             result.rawData[1] = 0;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2194,6 +2209,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = dimension;
             result.subresources = subresources;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2211,6 +2227,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = dimension;
             result.subresources = subresources;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2226,6 +2243,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2241,6 +2259,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2258,6 +2277,7 @@ namespace nvrhi
             result.format = Format::UNKNOWN;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2274,6 +2294,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.rawData[0] = 0;
             result.rawData[1] = 0;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2290,6 +2311,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.rawData[0] = 0;
             result.rawData[1] = 0;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2305,6 +2327,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2320,6 +2343,7 @@ namespace nvrhi
             result.format = format;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2335,6 +2359,7 @@ namespace nvrhi
             result.format = Format::UNKNOWN;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2350,6 +2375,7 @@ namespace nvrhi
             result.format = Format::UNKNOWN;
             result.dimension = TextureDimension::Unknown;
             result.range = range;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2366,6 +2392,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range.byteOffset = 0;
             result.range.byteSize = byteSize;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2381,6 +2408,7 @@ namespace nvrhi
             result.format = Format::UNKNOWN;
             result.dimension = TextureDimension::Unknown;
             result.subresources = AllSubresources;
+            result.enableAutomaticTransitions = true;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2391,6 +2419,7 @@ namespace nvrhi
         BindingSetItem& setDimension(TextureDimension value) { dimension = value; return *this; }
         BindingSetItem& setSubresources(TextureSubresourceSet value) { subresources = value; return *this; }
         BindingSetItem& setRange(BufferRange value) { range = value; return *this; }
+        BindingSetItem& setEnableAutomaticTransitions(bool value) { enableAutomaticTransitions = value; return *this; }
     };
 
     // verify the packing of BindingSetItem for good alignment
@@ -3870,9 +3899,11 @@ namespace std
             size_t value = 0;
             nvrhi::hash_combine(value, s.resourceHandle);
             nvrhi::hash_combine(value, s.slot);
+            nvrhi::hash_combine(value, s.arrayElement);
             nvrhi::hash_combine(value, s.type);
             nvrhi::hash_combine(value, s.dimension);
             nvrhi::hash_combine(value, s.format);
+            nvrhi::hash_combine(value, s.enableAutomaticTransitions);
             nvrhi::hash_combine(value, s.rawData[0]);
             nvrhi::hash_combine(value, s.rawData[1]);
             return value;

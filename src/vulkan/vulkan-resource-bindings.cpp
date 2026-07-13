@@ -388,7 +388,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
+                    .setImageLayout(convertTextureLayout(ResourceStates::ShaderResource, texture->desc));
 
                 generateWriteDescriptorData(
                     registerOffset + binding.slot,
@@ -417,7 +417,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(vk::ImageLayout::eGeneral);
+                    .setImageLayout(convertTextureLayout(ResourceStates::UnorderedAccess, texture->desc));
 
                 generateWriteDescriptorData(
                     registerOffset + binding.slot,
@@ -603,7 +603,7 @@ namespace nvrhi::vulkan
             case ResourceType::StructuredBuffer_UAV:
             case ResourceType::RawBuffer_UAV:
             case ResourceType::SamplerFeedbackTexture_UAV:
-                ret->hasUavBindings = true;
+                ret->hasUavBindings |= binding.enableAutomaticTransitions;
                 break;
             default:
                 break;
@@ -760,7 +760,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
+                    .setImageLayout(convertTextureLayout(ResourceStates::ShaderResource, texture->desc));
 
                 generateWriteDescriptorData(layoutBinding.binding,
                     convertResourceType(binding.type),
@@ -779,7 +779,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(vk::ImageLayout::eGeneral);
+                    .setImageLayout(convertTextureLayout(ResourceStates::UnorderedAccess, texture->desc));
 
                 generateWriteDescriptorData(layoutBinding.binding,
                     convertResourceType(binding.type),

@@ -28,6 +28,13 @@ namespace nvrhi::vulkan
     
     void CommandList::setResourceStatesForBindingSet(IBindingSet* _bindingSet)
     {
+        setResourceStatesForBindingSetInternal(_bindingSet, false);
+    }
+
+    void CommandList::setResourceStatesForBindingSetInternal(
+        IBindingSet* _bindingSet,
+        bool automaticOnly)
+    {
         if (_bindingSet == nullptr)
             return;
         if (_bindingSet->getDesc() == nullptr)
@@ -38,6 +45,9 @@ namespace nvrhi::vulkan
         for (auto bindingIndex : bindingSet->bindingsThatNeedTransitions)
         {
             const BindingSetItem& binding = bindingSet->desc.bindings[bindingIndex];
+
+            if (automaticOnly && !binding.enableAutomaticTransitions)
+                continue;
 
             switch(binding.type)  // NOLINT(clang-diagnostic-switch-enum)
             {
@@ -96,7 +106,7 @@ namespace nvrhi::vulkan
 
                 bool const updateThisSet = (bindingUpdateMask & (1u << i)) != 0;
                 if (updateThisSet || bindingSet->hasUavBindings) // UAV bindings may place UAV barriers on the same binding set
-                    setResourceStatesForBindingSet(newBindings[i]);
+                    setResourceStatesForBindingSetInternal(newBindings[i], true);
             }
         }
     }
@@ -213,12 +223,14 @@ namespace nvrhi::vulkan
 
         for (const TextureBarrier& barrier : m_StateTracker.getTextureBarriers())
         {
-            ResourceStateMapping before = convertResourceState(barrier.stateBefore, true);
-            ResourceStateMapping after = convertResourceState(barrier.stateAfter, true);
+            Texture* texture = static_cast<Texture*>(barrier.texture);
+
+            ResourceStateMapping before = convertResourceState(
+                barrier.stateBefore, true, texture->desc.useGeneralLayout);
+            ResourceStateMapping after = convertResourceState(
+                barrier.stateAfter, true, texture->desc.useGeneralLayout);
 
             assert(after.imageLayout != vk::ImageLayout::eUndefined);
-
-            Texture* texture = static_cast<Texture*>(barrier.texture);
 
             const FormatInfo& formatInfo = getFormatInfo(texture->desc.format);
 

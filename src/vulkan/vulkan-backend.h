@@ -77,7 +77,8 @@ namespace nvrhi::vulkan
     vk::SamplerAddressMode convertSamplerAddressMode(SamplerAddressMode mode);
     vk::PipelineStageFlagBits2 convertShaderTypeToPipelineStageFlagBits(ShaderType shaderType);
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType);
-    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage);
+    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage, bool useGeneralLayout = false);
+    vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc);
     vk::PrimitiveTopology convertPrimitiveTopology(PrimitiveType topology);
     vk::PolygonMode convertFillMode(RasterFillMode mode);
     vk::CullModeFlagBits convertCullMode(RasterCullMode mode);
@@ -1490,6 +1491,7 @@ namespace nvrhi::vulkan
         void insertMeshletResourceBarriers(const MeshletState& state);
         void insertRayTracingResourceBarriers(const rt::State& state);
         void insertResourceBarriersForBindingSets(const BindingSetVector& newBindings, const BindingSetVector& oldBindings);
+        void setResourceStatesForBindingSetInternal(IBindingSet* bindingSet, bool automaticOnly);
         
         void writeVolatileBuffer(Buffer* buffer, const void* data, size_t dataSize);
         void flushVolatileBufferWrites();

@@ -317,7 +317,7 @@ namespace nvrhi::vulkan
             vk::ImageLayout::eUndefined },
     };
 
-    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage)
+    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage, bool useGeneralLayout)
     {
         ResourceStateMapping result = {};
 
@@ -335,22 +335,30 @@ namespace nvrhi::vulkan
                 const ResourceStateMapping& mapping = g_ResourceStateMap[bitIndex];
 
                 assert(uint32_t(mapping.nvrhiState) == bit);
+                vk::ImageLayout imageLayout = mapping.imageLayout;
+                if (isImage && useGeneralLayout
+                    && imageLayout != vk::ImageLayout::eUndefined
+                    && imageLayout != vk::ImageLayout::ePresentSrcKHR)
+                {
+                    imageLayout = vk::ImageLayout::eGeneral;
+                }
+
                 if (isImage)
                 {
                     // If we're converting the state for an image, make sure that the requested state bits
                     // do not translate to different image layouts, which would be impossible to combine.
                     // For buffers, the image layout doesn't matter.
                     assert(result.imageLayout == vk::ImageLayout::eUndefined
-                        || mapping.imageLayout == vk::ImageLayout::eUndefined
-                        || result.imageLayout == mapping.imageLayout);
+                        || imageLayout == vk::ImageLayout::eUndefined
+                        || result.imageLayout == imageLayout);
                 }
 
                 result.nvrhiState = ResourceStates(result.nvrhiState | mapping.nvrhiState);
                 result.accessMask |= mapping.accessMask;
                 result.stageFlags |= mapping.stageFlags;
-                if (isImage && mapping.imageLayout != vk::ImageLayout::eUndefined)
+                if (isImage && imageLayout != vk::ImageLayout::eUndefined)
                 {
-                    result.imageLayout = mapping.imageLayout;
+                    result.imageLayout = imageLayout;
                 }
 
                 stateTmp &= ~bit;
@@ -362,6 +370,11 @@ namespace nvrhi::vulkan
         assert(result.nvrhiState == state);
 
         return result;
+    }
+
+    vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc)
+    {
+        return convertResourceState(state, true, desc.useGeneralLayout).imageLayout;
     }
 
     const char* resultToString(VkResult result)

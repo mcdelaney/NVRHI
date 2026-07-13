@@ -76,7 +76,7 @@ namespace nvrhi::vulkan
             vk::RenderingAttachmentInfo& attachmentInfo = fb->colorAttachments.emplace_back();
             attachmentInfo = vk::RenderingAttachmentInfo()
                 .setImageView(view.view)
-                .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                .setImageLayout(convertTextureLayout(ResourceStates::RenderTarget, t->desc))
                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
                 .setStoreOp(vk::AttachmentStoreOp::eStore);
 
@@ -93,11 +93,10 @@ namespace nvrhi::vulkan
             assert(fb->framebufferInfo.width == std::max(texture->desc.width >> att.subresources.baseMipLevel, 1u));
             assert(fb->framebufferInfo.height == std::max(texture->desc.height >> att.subresources.baseMipLevel, 1u));
 
-            vk::ImageLayout depthLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
-            if (desc.depthAttachment.isReadOnly)
-            {
-                depthLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal;
-            }
+            const ResourceStates depthState = desc.depthAttachment.isReadOnly
+                ? ResourceStates::DepthRead
+                : ResourceStates::DepthWrite;
+            const vk::ImageLayout depthLayout = convertTextureLayout(depthState, texture->desc);
 
             TextureSubresourceSet subresources = att.subresources.resolve(texture->desc, true);
 
@@ -136,7 +135,7 @@ namespace nvrhi::vulkan
             m_Context.physicalDevice.getProperties2(&props);
 
             fb->shadingRateAttachment = vk::RenderingFragmentShadingRateAttachmentInfoKHR()
-                .setImageLayout(vk::ImageLayout::eFragmentShadingRateAttachmentOptimalKHR)
+                .setImageLayout(convertTextureLayout(ResourceStates::ShadingRateSurface, vrsTexture->desc))
                 .setImageView(view.view)
                 .setShadingRateAttachmentTexelSize(rateProps.minFragmentShadingRateAttachmentTexelSize);
 
