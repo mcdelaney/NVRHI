@@ -735,7 +735,8 @@ namespace nvrhi::vulkan
 
         for (size_t i = 0; i < numCommandLists; i++)
         {
-            checked_cast<CommandList*>(pCommandLists[i])->executed(queue, submissionID);
+            checked_cast<CommandList*>(pCommandLists[i])->executed(
+                queue, executionQueue, submissionID);
         }
 
         return submissionID;
@@ -752,7 +753,8 @@ namespace nvrhi::vulkan
 
         for (size_t i = 0; i < numCommandLists; i++)
         {
-            checked_cast<CommandList*>(pCommandLists[i])->executed(queue, submissionID);
+            checked_cast<CommandList*>(pCommandLists[i])->executed(
+                queue, executionQueue, submissionID);
         }
 
         return submissionID;
@@ -769,7 +771,8 @@ namespace nvrhi::vulkan
 
         for (size_t i = 0; i < numCommandLists; i++)
         {
-            checked_cast<CommandList*>(pCommandLists[i])->executed(queue, submissionID);
+            checked_cast<CommandList*>(pCommandLists[i])->executed(
+                queue, executionQueue, submissionID);
         }
 
         return submissionID;

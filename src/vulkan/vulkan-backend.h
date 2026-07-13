@@ -1334,7 +1334,7 @@ namespace nvrhi::vulkan
         CommandList(Device* device, const VulkanContext& context, const CommandListParameters& parameters);
         ~CommandList() override;
 
-        void executed(Queue& queue, uint64_t submissionID);
+        void executed(Queue& queue, CommandQueue executionQueue, uint64_t submissionID);
 
         // IResource implementation
 

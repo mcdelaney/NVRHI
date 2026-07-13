@@ -5,6 +5,7 @@
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <nvrhi/vulkan.h>
+#include "vulkan-backend.h"
 #include "vulkan-queue-utils.h"
 #include "vulkan-timestamp-utils.h"
 
@@ -121,6 +122,24 @@ namespace
         uint64_t value = 0;
         vkGetSemaphoreCounterValue(device, semaphore, &value);
         return value;
+    }
+
+    VkBuffer findUploadChunk(nvrhi::ICommandList* commandList)
+    {
+        auto* vulkanCommandList = static_cast<nvrhi::vulkan::CommandList*>(commandList);
+        const nvrhi::vulkan::TrackedCommandBufferPtr trackedCommandBuffer =
+            vulkanCommandList->getCurrentCmdBuf();
+        if (!trackedCommandBuffer)
+            return VK_NULL_HANDLE;
+
+        for (const nvrhi::RefCountPtr<nvrhi::vulkan::Buffer>& buffer
+            : trackedCommandBuffer->referencedStagingBuffers)
+        {
+            if (buffer && buffer->getDesc().debugName == "UploadChunk")
+                return buffer->getNativeObject(nvrhi::ObjectTypes::VK_Buffer);
+        }
+
+        return VK_NULL_HANDLE;
     }
 }
 
@@ -476,7 +495,19 @@ int main()
     readbackDesc.sharedAcrossQueues = true;
     readbackDesc.debugName = "SubmitSyncTestReadback";
     nvrhi::BufferHandle readback = device->createBuffer(readbackDesc);
-    passed &= bool(bufferA) && bool(bufferB) && bool(readback);
+    constexpr size_t uploadProbeSize = 64 * 1024 + 4;
+    std::vector<uint8_t> uploadProbeData(uploadProbeSize, 0x5a);
+    nvrhi::BufferDesc uploadProbeDesc {};
+    uploadProbeDesc.byteSize = uploadProbeSize;
+    uploadProbeDesc.initialState = nvrhi::ResourceStates::Common;
+    uploadProbeDesc.keepInitialState = true;
+    uploadProbeDesc.sharedAcrossQueues = true;
+    uploadProbeDesc.debugName = "CopyUploadRetirementProbe";
+    nvrhi::BufferHandle copyUploadProbe = device->createBuffer(uploadProbeDesc);
+    uploadProbeDesc.debugName = "ComputeUploadRetirementProbe";
+    nvrhi::BufferHandle computeUploadProbe = device->createBuffer(uploadProbeDesc);
+    passed &= bool(bufferA) && bool(bufferB) && bool(readback)
+        && bool(copyUploadProbe) && bool(computeUploadProbe);
 
     nvrhi::CommandListHandle copyCommandList = device->createCommandList(
         nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Copy));
@@ -487,12 +518,18 @@ int main()
     passed &= bool(copyCommandList) && bool(computeCommandList) && bool(graphicsCommandList);
 
     VkSemaphore contentTimeline = timeline();
-    if (bufferA && bufferB && readback
+    if (bufferA && bufferB && readback && copyUploadProbe && computeUploadProbe
         && copyCommandList && computeCommandList && graphicsCommandList)
     {
         copyCommandList->open();
         copyCommandList->writeBuffer(bufferA, expectedWords.data(), sizeof(expectedWords));
+        copyCommandList->writeBuffer(
+            copyUploadProbe, uploadProbeData.data(), uploadProbeData.size());
         copyCommandList->close();
+        const VkBuffer firstCopyUploadChunk = findUploadChunk(copyCommandList);
+        passed &= firstCopyUploadChunk != VK_NULL_HANDLE;
+        if (firstCopyUploadChunk == VK_NULL_HANDLE)
+            std::cerr << "Copy UploadManager did not allocate an upload chunk\n";
         nvrhi::ICommandList* copyPtr = copyCommandList.Get();
         const uint64_t contentValue1 = 1;
         nvrhi::vulkan::SubmitSyncExtras copyExtras {};
@@ -505,7 +542,13 @@ int main()
         computeCommandList->open();
         computeCommandList->copyBuffer(
             bufferB, 0, bufferA, 0, sizeof(expectedWords));
+        computeCommandList->writeBuffer(
+            computeUploadProbe, uploadProbeData.data(), uploadProbeData.size());
         computeCommandList->close();
+        const VkBuffer firstComputeUploadChunk = findUploadChunk(computeCommandList);
+        passed &= firstComputeUploadChunk != VK_NULL_HANDLE;
+        if (firstComputeUploadChunk == VK_NULL_HANDLE)
+            std::cerr << "Compute UploadManager did not allocate an upload chunk\n";
         device->queueWaitForCommandListAtStage(
             nvrhi::CommandQueue::Compute, nvrhi::CommandQueue::Copy, copyId,
             VK_PIPELINE_STAGE_2_COPY_BIT);
@@ -549,6 +592,48 @@ int main()
             passed &= std::memcmp(mapped, expectedWords.data(), sizeof(expectedWords)) == 0;
             device->unmapBuffer(readback);
         }
+
+        // The writes exceed vkCmdUpdateBuffer's 64 KiB limit and therefore
+        // force UploadManager chunks. Once the first submissions complete,
+        // both logical queues must retire and reuse those exact chunks even
+        // though they alias the Graphics physical Queue object.
+        VkSemaphore uploadReuseTimeline = timeline();
+        copyCommandList->open();
+        copyCommandList->writeBuffer(
+            copyUploadProbe, uploadProbeData.data(), uploadProbeData.size());
+        copyCommandList->close();
+        const VkBuffer secondCopyUploadChunk = findUploadChunk(copyCommandList);
+        passed &= secondCopyUploadChunk == firstCopyUploadChunk;
+        if (secondCopyUploadChunk != firstCopyUploadChunk)
+            std::cerr << "Copy UploadManager did not retire and reuse its upload chunk\n";
+
+        const uint64_t uploadReuseValue1 = 1;
+        nvrhi::vulkan::SubmitSyncExtras copyReuseExtras {};
+        copyReuseExtras.signalSemaphores = &uploadReuseTimeline;
+        copyReuseExtras.signalValues = &uploadReuseValue1;
+        copyReuseExtras.numSignals = 1;
+        const uint64_t copyReuseId = device->executeCommandListsWithSyncIsolated(
+            &copyPtr, 1, nvrhi::CommandQueue::Copy, copyReuseExtras);
+
+        computeCommandList->open();
+        computeCommandList->writeBuffer(
+            computeUploadProbe, uploadProbeData.data(), uploadProbeData.size());
+        computeCommandList->close();
+        const VkBuffer secondComputeUploadChunk = findUploadChunk(computeCommandList);
+        passed &= secondComputeUploadChunk == firstComputeUploadChunk;
+        if (secondComputeUploadChunk != firstComputeUploadChunk)
+            std::cerr << "Compute UploadManager did not retire and reuse its upload chunk\n";
+
+        const uint64_t uploadReuseValue2 = 2;
+        nvrhi::vulkan::SubmitSyncExtras computeReuseExtras {};
+        computeReuseExtras.signalSemaphores = &uploadReuseTimeline;
+        computeReuseExtras.signalValues = &uploadReuseValue2;
+        computeReuseExtras.numSignals = 1;
+        const uint64_t computeReuseId = device->executeCommandListsWithSyncIsolated(
+            &computePtr, 1, nvrhi::CommandQueue::Compute, computeReuseExtras);
+        passed &= computeReuseId > copyReuseId;
+        passed &= waitTimeline(vkDevice, uploadReuseTimeline, uploadReuseValue2);
+        previousId = computeReuseId;
     }
 
     // Exercise the raw timer range API against an actual Vulkan timestamp
@@ -628,6 +713,8 @@ int main()
     bufferA = nullptr;
     bufferB = nullptr;
     readback = nullptr;
+    copyUploadProbe = nullptr;
+    computeUploadProbe = nullptr;
     device->runGarbageCollection();
     device->runGarbageCollection();
     device = nullptr;

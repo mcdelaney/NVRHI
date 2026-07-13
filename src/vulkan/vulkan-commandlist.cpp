@@ -121,13 +121,13 @@ namespace nvrhi::vulkan
         m_CurrentCmdBuf->cmdBuf.pushConstants(m_CurrentPipelineLayout, m_CurrentPushConstantsVisibility, 0, uint32_t(byteSize), data);
     }
 
-    void CommandList::executed(Queue& queue, const uint64_t submissionID)
+    void CommandList::executed(
+        Queue& queue, const CommandQueue executionQueue, const uint64_t submissionID)
     {
         assert(m_CurrentCmdBuf);
 
         m_CurrentCmdBuf->submissionID = submissionID;
 
-        const CommandQueue queueID = queue.getQueueID();
         const uint64_t recordingID = m_CurrentCmdBuf->recordingID;
 
         // Hand the in-flight command buffer to the lifetime tracker. If the
@@ -150,12 +150,12 @@ namespace nvrhi::vulkan
         m_StateTracker.commandListSubmitted();
 
         m_UploadManager->submitChunks(
-            MakeVersion(recordingID, queueID, false),
-            MakeVersion(submissionID, queueID, true));
+            MakeVersion(recordingID, executionQueue, false),
+            MakeVersion(submissionID, executionQueue, true));
 
         m_ScratchManager->submitChunks(
-            MakeVersion(recordingID, queueID, false),
-            MakeVersion(submissionID, queueID, true));
+            MakeVersion(recordingID, executionQueue, false),
+            MakeVersion(submissionID, executionQueue, true));
 
         m_VolatileBufferStates.clear();
     }
