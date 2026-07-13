@@ -2102,11 +2102,26 @@ namespace nvrhi
 
         LayoutType layoutType = LayoutType::Immutable;
 
+        // Vulkan only: allows descriptor-table entries to be updated after the
+        // table has been bound to a command buffer. The application must enable
+        // the matching descriptorBinding*UpdateAfterBind device features and
+        // must still obey Vulkan's descriptor/resource lifetime requirements.
+        // Ignored by other backends. Disabled by default for compatibility.
+        bool enableUpdateAfterBind = false;
+
+        // Vulkan only: allows unused descriptor-table entries to be updated
+        // while a command buffer using the table is pending. This requires
+        // enableUpdateAfterBind and the descriptorBindingUpdateUnusedWhilePending
+        // device feature. Ignored by other backends. Disabled by default.
+        bool enableUpdateUnusedWhilePending = false;
+
         BindlessLayoutDesc& setVisibility(ShaderType value) { visibility = value; return *this; }
         BindlessLayoutDesc& setFirstSlot(uint32_t value) { firstSlot = value; return *this; }
         BindlessLayoutDesc& setMaxCapacity(uint32_t value) { maxCapacity = value; return *this; }
         BindlessLayoutDesc& addRegisterSpace(const BindingLayoutItem& value) { registerSpaces.push_back(value); return *this; }
         BindlessLayoutDesc& setLayoutType(LayoutType value) { layoutType = value; return *this; }
+        BindlessLayoutDesc& setEnableUpdateAfterBind(bool value) { enableUpdateAfterBind = value; return *this; }
+        BindlessLayoutDesc& setEnableUpdateUnusedWhilePending(bool value) { enableUpdateUnusedWhilePending = value; return *this; }
     };
 
     class IBindingLayout : public IResource

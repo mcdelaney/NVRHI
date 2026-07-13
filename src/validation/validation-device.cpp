@@ -1463,6 +1463,12 @@ namespace nvrhi::validation
             anyErrors = true;
         }
 
+        if (desc.enableUpdateUnusedWhilePending && !desc.enableUpdateAfterBind)
+        {
+            errorStream << "Bindless layout enableUpdateUnusedWhilePending requires enableUpdateAfterBind" << std::endl;
+            anyErrors = true;
+        }
+
         for (const BindingLayoutItem& item : desc.registerSpaces)
         {
             switch (item.type)

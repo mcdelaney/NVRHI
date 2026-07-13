@@ -64,6 +64,95 @@ namespace
     std::mutex* waitIdleQueueMutex = nullptr;
     bool waitIdleObservedQueueLock = false;
 
+    PFN_vkCreateDescriptorSetLayout realCreateDescriptorSetLayout = nullptr;
+    PFN_vkCreateDescriptorPool realCreateDescriptorPool = nullptr;
+
+    struct DescriptorUpdateAfterBindProbe
+    {
+        bool active = false;
+        bool sawLayout = false;
+        bool layoutUsesUpdateAfterBindPool = false;
+        bool sawBindingFlags = false;
+        bool bindingsUseUpdateAfterBind = false;
+        bool bindingsUseUpdateUnusedWhilePending = false;
+        bool sawPool = false;
+        bool poolUsesUpdateAfterBind = false;
+
+        void reset()
+        {
+            sawLayout = false;
+            layoutUsesUpdateAfterBindPool = false;
+            sawBindingFlags = false;
+            bindingsUseUpdateAfterBind = false;
+            bindingsUseUpdateUnusedWhilePending = false;
+            sawPool = false;
+            poolUsesUpdateAfterBind = false;
+        }
+    } descriptorUpdateAfterBindProbe;
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeCreateDescriptorSetLayout(
+        VkDevice device,
+        const VkDescriptorSetLayoutCreateInfo* createInfo,
+        const VkAllocationCallbacks* allocationCallbacks,
+        VkDescriptorSetLayout* descriptorSetLayout)
+    {
+        if (descriptorUpdateAfterBindProbe.active && createInfo)
+        {
+            descriptorUpdateAfterBindProbe.sawLayout = true;
+            descriptorUpdateAfterBindProbe.layoutUsesUpdateAfterBindPool =
+                (createInfo->flags
+                    & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) != 0;
+
+            const VkBaseInStructure* next =
+                static_cast<const VkBaseInStructure*>(createInfo->pNext);
+            while (next)
+            {
+                if (next->sType
+                    == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO)
+                {
+                    const auto* bindingFlags =
+                        reinterpret_cast<const VkDescriptorSetLayoutBindingFlagsCreateInfo*>(next);
+                    descriptorUpdateAfterBindProbe.sawBindingFlags = true;
+                    descriptorUpdateAfterBindProbe.bindingsUseUpdateAfterBind =
+                        bindingFlags->bindingCount != 0;
+                    descriptorUpdateAfterBindProbe.bindingsUseUpdateUnusedWhilePending =
+                        bindingFlags->bindingCount != 0;
+                    for (uint32_t i = 0; i < bindingFlags->bindingCount; ++i)
+                    {
+                        if ((bindingFlags->pBindingFlags[i]
+                            & VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT) == 0)
+                            descriptorUpdateAfterBindProbe.bindingsUseUpdateAfterBind = false;
+                        if ((bindingFlags->pBindingFlags[i]
+                            & VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT) == 0)
+                            descriptorUpdateAfterBindProbe.bindingsUseUpdateUnusedWhilePending = false;
+                    }
+                    break;
+                }
+                next = next->pNext;
+            }
+        }
+
+        return realCreateDescriptorSetLayout(
+            device, createInfo, allocationCallbacks, descriptorSetLayout);
+    }
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeCreateDescriptorPool(
+        VkDevice device,
+        const VkDescriptorPoolCreateInfo* createInfo,
+        const VkAllocationCallbacks* allocationCallbacks,
+        VkDescriptorPool* descriptorPool)
+    {
+        if (descriptorUpdateAfterBindProbe.active && createInfo)
+        {
+            descriptorUpdateAfterBindProbe.sawPool = true;
+            descriptorUpdateAfterBindProbe.poolUsesUpdateAfterBind =
+                (createInfo->flags & VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT) != 0;
+        }
+
+        return realCreateDescriptorPool(
+            device, createInfo, allocationCallbacks, descriptorPool);
+    }
+
     VKAPI_ATTR VkResult VKAPI_CALL probeDeviceWaitIdle(VkDevice device)
     {
         bool probeAcquiredQueueLock = false;
@@ -264,6 +353,7 @@ int main()
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex = UINT32_MAX;
+    bool supportsDescriptorUpdateAfterBindProbe = false;
     for (VkPhysicalDevice candidate : physicalDevices)
     {
         VkPhysicalDeviceVulkan13Features supported13 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
@@ -290,6 +380,11 @@ int main()
             {
                 physicalDevice = candidate;
                 queueFamilyIndex = i;
+                supportsDescriptorUpdateAfterBindProbe =
+                    supported12.descriptorIndexing
+                    && supported12.descriptorBindingPartiallyBound
+                    && supported12.descriptorBindingSampledImageUpdateAfterBind
+                    && supported12.descriptorBindingUpdateUnusedWhilePending;
                 break;
             }
         }
@@ -309,6 +404,13 @@ int main()
     VkPhysicalDeviceVulkan12Features enabled12 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     enabled12.pNext = &enabled13;
     enabled12.timelineSemaphore = VK_TRUE;
+    if (supportsDescriptorUpdateAfterBindProbe)
+    {
+        enabled12.descriptorIndexing = VK_TRUE;
+        enabled12.descriptorBindingPartiallyBound = VK_TRUE;
+        enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        enabled12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    }
     VkDeviceCreateInfo deviceInfo { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     deviceInfo.pNext = &enabled12;
     deviceInfo.queueCreateInfoCount = 1;
@@ -342,6 +444,68 @@ int main()
         return 1;
 
     bool passed = true;
+
+    // Bindless update-after-bind is opt-in. Probe Vulkan-Hpp's dispatched
+    // creation calls so the test covers all three required pieces: binding,
+    // descriptor-set layout, and descriptor pool flags. The default layout
+    // must retain the old behavior.
+    passed &= !nvrhi::BindlessLayoutDesc {}.enableUpdateAfterBind;
+    passed &= !nvrhi::BindlessLayoutDesc {}.enableUpdateUnusedWhilePending;
+    if (supportsDescriptorUpdateAfterBindProbe)
+    {
+        realCreateDescriptorSetLayout =
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorSetLayout;
+        realCreateDescriptorPool =
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorPool;
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorSetLayout =
+            probeCreateDescriptorSetLayout;
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorPool =
+            probeCreateDescriptorPool;
+        descriptorUpdateAfterBindProbe.active = true;
+
+        const auto createBindlessTable = [&](bool enableUpdateAfterBind,
+                                             bool enableUpdateUnusedWhilePending) {
+            descriptorUpdateAfterBindProbe.reset();
+            nvrhi::BindlessLayoutDesc desc {};
+            desc.visibility = nvrhi::ShaderType::All;
+            desc.maxCapacity = 8;
+            desc.registerSpaces.push_back(
+                nvrhi::BindingLayoutItem::Texture_SRV(0));
+            desc.enableUpdateAfterBind = enableUpdateAfterBind;
+            desc.enableUpdateUnusedWhilePending = enableUpdateUnusedWhilePending;
+
+            nvrhi::BindingLayoutHandle layout =
+                device->createBindlessLayout(desc);
+            nvrhi::DescriptorTableHandle table;
+            if (layout)
+                table = device->createDescriptorTable(layout);
+
+            const bool created = layout && table;
+            const bool flagsMatch =
+                descriptorUpdateAfterBindProbe.sawLayout
+                && descriptorUpdateAfterBindProbe.sawBindingFlags
+                && descriptorUpdateAfterBindProbe.sawPool
+                && (descriptorUpdateAfterBindProbe.layoutUsesUpdateAfterBindPool
+                    == enableUpdateAfterBind)
+                && (descriptorUpdateAfterBindProbe.bindingsUseUpdateAfterBind
+                    == enableUpdateAfterBind)
+                && (descriptorUpdateAfterBindProbe.bindingsUseUpdateUnusedWhilePending
+                    == enableUpdateUnusedWhilePending)
+                && (descriptorUpdateAfterBindProbe.poolUsesUpdateAfterBind
+                    == enableUpdateAfterBind);
+            return created && flagsMatch;
+        };
+
+        passed &= createBindlessTable(false, false);
+        passed &= createBindlessTable(true, false);
+        passed &= createBindlessTable(true, true);
+
+        descriptorUpdateAfterBindProbe.active = false;
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorSetLayout =
+            realCreateDescriptorSetLayout;
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorPool =
+            realCreateDescriptorPool;
+    }
 
     // Binding-set cache identity must include both descriptor-array placement
     // and the per-item implicit-transition policy.
