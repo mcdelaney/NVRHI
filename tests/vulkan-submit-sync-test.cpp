@@ -373,7 +373,7 @@ int main()
     VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = failQueueSubmit2;
     nvrhi::ICommandList* failureProbePtr = failureProbe.Get();
     nvrhi::vulkan::SubmitSyncExtras failureExtras {};
-    const uint64_t failedSubmitId = device->executeCommandListsWithSyncIsolated(
+    const uint64_t failedSubmitId = device->tryExecuteCommandListsWithSyncIsolated(
         &failureProbePtr, 1, nvrhi::CommandQueue::Graphics, failureExtras);
     VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = realQueueSubmit2;
     passed &= failedSubmitId == 0;
@@ -382,7 +382,7 @@ int main()
     passed &= messageCallback.errors == errorsBeforeFailedSubmit + 1;
     messageCallback.errors = errorsBeforeFailedSubmit;
 
-    const uint64_t retrySubmitId = device->executeCommandListsWithSyncIsolated(
+    const uint64_t retrySubmitId = device->tryExecuteCommandListsWithSyncIsolated(
         &failureProbePtr, 1, nvrhi::CommandQueue::Graphics, failureExtras);
     passed &= retrySubmitId == beforeFailedSubmit + 1;
     passed &= failureProbeVk->getCurrentCmdBuf() == nullptr;

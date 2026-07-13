@@ -103,9 +103,19 @@ namespace nvrhi::vulkan
 
         // Submit ppCmd with the per-submit wait/signal extras attached to
         // THIS submit only, BYPASSING the queue accumulator. See SubmitSyncExtras
-        // doc above. Returns the nonzero queue timeline ID on success and 0
-        // when Vulkan queue submission fails.
+        // doc above. Submission errors retain the legacy fatal/exception behavior.
         virtual uint64_t executeCommandListsWithSyncIsolated(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) = 0;
+
+        // Retry-aware form of executeCommandListsWithSyncIsolated. Returns 0
+        // only when Vulkan guarantees that no command buffer, semaphore, or
+        // fence operation was submitted (currently OUT_OF_HOST_MEMORY and
+        // OUT_OF_DEVICE_MEMORY). In that case every command list remains closed
+        // and executable and MUST be retried exactly; do not call open() on it.
+        // Device loss is ambiguous and is conservatively treated as submitted.
+        virtual uint64_t tryExecuteCommandListsWithSyncIsolated(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) = 0;

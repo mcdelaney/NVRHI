@@ -62,6 +62,11 @@ namespace nvrhi::vulkan
 
     void CommandList::open()
     {
+        // A retry-aware isolated submit leaves the exact closed command buffer
+        // here when Vulkan guarantees that nothing was submitted. Reopening
+        // would overwrite recording-version state that must instead be retried.
+        assert(!m_CurrentCmdBuf && "Cannot reopen an unsubmitted command list");
+
         m_CurrentCmdBuf = m_Device->getQueue(m_CommandListParameters.queueType)->getOrCreateCommandBuffer();
 
         auto beginInfo = vk::CommandBufferBeginInfo()

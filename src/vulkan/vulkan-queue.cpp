@@ -160,12 +160,20 @@ namespace nvrhi::vulkan
         return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/false);
     }
 
+    uint64_t Queue::trySubmitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras)
+    {
+        return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/false,
+            /*reportSafeFailure=*/true);
+    }
+
     uint64_t Queue::submitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras)
     {
         return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/true);
     }
 
-    uint64_t Queue::submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator)
+    uint64_t Queue::submitImpl(ICommandList* const* ppCmd, size_t numCmd,
+        const SubmitSyncExtras* extras, bool drainAccumulator,
+        bool reportSafeFailure)
     {
         // Hold the queue mutex for the entire body. This serves three
         // purposes:
@@ -297,14 +305,19 @@ namespace nvrhi::vulkan
         catch (vk::DeviceLostError&)
         {
             m_Context.messageCallback->message(MessageSeverity::Error, "Device Removed!");
-            // Preserve the legacy draining-submit behavior for existing callers,
-            // which treat device loss as fatal and do not implement rollback.
-            // Isolated worker submits have an explicit zero-on-failure contract.
-            submitSucceeded = drainAccumulator;
+            // Vulkan makes device-loss submission disposition ambiguous. Treat
+            // the command buffers as submitted so a caller never retries work
+            // that may already have executed. The application's device-loss
+            // path is fatal; this only preserves correct object lifetime.
+            submitSucceeded = true;
         }
         catch (const vk::SystemError& error)
         {
-            if (drainAccumulator)
+            const VkResult result = static_cast<VkResult>(error.code().value());
+            const bool guaranteedNotSubmitted =
+                result == VK_ERROR_OUT_OF_HOST_MEMORY
+                || result == VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            if (!reportSafeFailure || !guaranteedNotSubmitted)
                 throw;
 
             const std::string message =

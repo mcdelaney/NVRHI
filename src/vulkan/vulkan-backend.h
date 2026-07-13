@@ -250,8 +250,12 @@ namespace nvrhi::vulkan
         // with another submitter that has critical syncs queued via the
         // accumulator (e.g. the swapchain-tail's acquire wait + present
         // signal). The plain submit() drains the accumulator as before.
-        // Returns 0 when Vulkan queue submission fails.
+        // Preserves legacy fatal/exception behavior on submission failure.
         uint64_t submitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
+
+        // Retry-aware isolated submit. Returns 0 only for Vulkan failures that
+        // guarantee the submitted objects were untouched.
+        uint64_t trySubmitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
 
         // Submit with explicit per-submit waits/signals AND drain the
         // queue's accumulator atomically. Use this for the swapchain-tail
@@ -272,7 +276,9 @@ namespace nvrhi::vulkan
         };
 
         vk::PipelineStageFlags2 normalizeWaitStageMask(vk::PipelineStageFlags2 stageMask) const;
-        uint64_t submitImpl(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras* extras, bool drainAccumulator);
+        uint64_t submitImpl(ICommandList* const* ppCmd, size_t numCmd,
+            const SubmitSyncExtras* extras, bool drainAccumulator,
+            bool reportSafeFailure = false);
     public:
 
         void updateTextureTileMappings(
@@ -1281,6 +1287,11 @@ namespace nvrhi::vulkan
         uint64_t queueGetCompletedInstance(CommandQueue queue) override;
         std::mutex& getQueueMutex(CommandQueue queue) override;
         uint64_t executeCommandListsWithSyncIsolated(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) override;
+
+        uint64_t tryExecuteCommandListsWithSyncIsolated(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) override;
