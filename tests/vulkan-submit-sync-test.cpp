@@ -593,6 +593,48 @@ int main()
             device->unmapBuffer(readback);
         }
 
+        // A write whose byte count is not a multiple of four must not modify
+        // the following byte. The fourth source byte is deliberately poison:
+        // rounding the write up for vkCmdUpdateBuffer would expose it.
+        constexpr size_t partialWriteSize = 3;
+        constexpr std::array<uint8_t, 4> partialWriteData {
+            0xa1, 0xb2, 0xc3, 0xee
+        };
+        std::array<uint8_t, sizeof(expectedWords)> partialWriteExpected {};
+        std::memcpy(
+            partialWriteExpected.data(), expectedWords.data(), sizeof(expectedWords));
+        std::memcpy(
+            partialWriteExpected.data() + 4, partialWriteData.data(), partialWriteSize);
+
+        graphicsCommandList->open();
+        graphicsCommandList->writeBuffer(
+            bufferA, partialWriteData.data(), partialWriteSize, 4);
+        graphicsCommandList->copyBuffer(
+            readback, 0, bufferA, 0, sizeof(expectedWords));
+        graphicsCommandList->close();
+
+        const uint64_t partialWriteValue = 4;
+        nvrhi::vulkan::SubmitSyncExtras partialWriteExtras {};
+        partialWriteExtras.signalSemaphores = &contentTimeline;
+        partialWriteExtras.signalValues = &partialWriteValue;
+        partialWriteExtras.numSignals = 1;
+        device->executeCommandListsWithSyncIsolated(
+            &graphicsPtr, 1, nvrhi::CommandQueue::Graphics, partialWriteExtras);
+
+        passed &= waitTimeline(vkDevice, contentTimeline, partialWriteValue);
+        mapped = device->mapBuffer(readback, nvrhi::CpuAccessMode::Read);
+        passed &= mapped != nullptr;
+        if (mapped)
+        {
+            const bool partialWritePreservedNeighbor =
+                std::memcmp(
+                    mapped, partialWriteExpected.data(), partialWriteExpected.size()) == 0;
+            passed &= partialWritePreservedNeighbor;
+            if (!partialWritePreservedNeighbor)
+                std::cerr << "Partial writeBuffer modified bytes outside its destination range\n";
+            device->unmapBuffer(readback);
+        }
+
         // The writes exceed vkCmdUpdateBuffer's 64 KiB limit and therefore
         // force UploadManager chunks. Once the first submissions complete,
         // both logical queues must retire and reuse those exact chunks even

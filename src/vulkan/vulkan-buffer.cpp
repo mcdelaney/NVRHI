@@ -455,9 +455,13 @@ namespace nvrhi::vulkan
     {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
-        assert(dataSize <= buffer->desc.byteSize);
+        assert(destOffsetBytes <= buffer->desc.byteSize);
+        assert(dataSize <= buffer->desc.byteSize - destOffsetBytes);
 
         assert(m_CurrentCmdBuf);
+
+        if (dataSize == 0)
+            return;
 
         m_CurrentCmdBuf->referencedResources.push_back(buffer);
 
@@ -477,9 +481,10 @@ namespace nvrhi::vulkan
         const size_t vkCmdUpdateBufferLimit = 65536;
 
         // Per Vulkan spec, vkCmdUpdateBuffer requires that the data size is smaller than or equal to 64 kB,
-        // and that the offset and data size are a multiple of 4. We can't change the offset, but data size
-        // is rounded up later.
-        if (dataSize <= vkCmdUpdateBufferLimit && (destOffsetBytes & 3) == 0)
+        // and that the offset and data size are a multiple of 4. Use the upload-manager copy path for
+        // unaligned sizes instead of rounding up: rounding reads past the caller's source span and writes
+        // past the requested destination range.
+        if (dataSize <= vkCmdUpdateBufferLimit && (destOffsetBytes & 3) == 0 && (dataSize & 3) == 0)
         {
             if (m_EnableAutomaticBarriers)
             {
@@ -488,10 +493,7 @@ namespace nvrhi::vulkan
             }
             commitBarriers();
 
-            // Round up the write size to a multiple of 4
-            const size_t sizeToWrite = (dataSize + 3) & ~3ull;
-
-            m_CurrentCmdBuf->cmdBuf.updateBuffer(buffer->buffer, destOffsetBytes, sizeToWrite, data);
+            m_CurrentCmdBuf->cmdBuf.updateBuffer(buffer->buffer, destOffsetBytes, dataSize, data);
         }
         else
         {
