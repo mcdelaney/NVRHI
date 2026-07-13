@@ -186,6 +186,7 @@ set(src_vk
     src/vulkan/vulkan-queries.cpp
     src/vulkan/vulkan-queue.cpp
     src/vulkan/vulkan-queue-utils.h
+    src/vulkan/vulkan-timestamp-utils.h
     src/vulkan/vulkan-raytracing.cpp
     src/vulkan/vulkan-resource-bindings.cpp
     src/vulkan/vulkan-shader.cpp

@@ -21,6 +21,7 @@
 */
 
 #include "vulkan-backend.h"
+#include "vulkan-timestamp-utils.h"
 #include <nvrhi/common/misc.h>
 
 namespace nvrhi::vulkan
@@ -123,7 +124,20 @@ namespace nvrhi::vulkan
         assert(!query->started);
         assert(m_CurrentCmdBuf);
 
+        Queue* queue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const uint32_t timestampValidBits = queue->getTimestampValidBits();
+        if (timestampValidBits == 0 || timestampValidBits > 64)
+        {
+            m_Context.error("Timer queries are not supported by this Vulkan queue family");
+            assert(false && "Invalid Vulkan timestampValidBits");
+            return;
+        }
+
         query->resolved = false;
+        query->beginTimestamp = 0;
+        query->endTimestamp = 0;
+        query->timestampValidBits = timestampValidBits;
+        query->queueFamilyIndex = queue->getQueueFamilyIndex();
 
         m_CurrentCmdBuf->cmdBuf.resetQueryPool(m_Device->getTimerQueryPool(), query->beginQueryIndex, 2);
         m_CurrentCmdBuf->cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_Device->getTimerQueryPool(), query->beginQueryIndex);
@@ -140,6 +154,15 @@ namespace nvrhi::vulkan
         assert(!query->resolved);
 
         assert(m_CurrentCmdBuf);
+
+        Queue* queue = m_Device->getQueue(m_CommandListParameters.queueType);
+        if (query->queueFamilyIndex != queue->getQueueFamilyIndex()
+            || query->timestampValidBits != queue->getTimestampValidBits())
+        {
+            m_Context.error("A Vulkan timer query must begin and end on the same queue family");
+            assert(false && "Timer query endpoints use different timestamp domains");
+            return;
+        }
 
         m_CurrentCmdBuf->cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_Device->getTimerQueryPool(), query->endQueryIndex);
         query->started = true;
@@ -159,24 +182,30 @@ namespace nvrhi::vulkan
             return true;
         }
 
-        uint32_t timestamps[2] = { 0, 0 };
+        uint64_t timestamps[2] = { 0, 0 };
 
         vk::Result res;
         res = m_Context.device.getQueryPoolResults(m_TimerQueryPool,
                                                  query->beginQueryIndex, 2,
                                                  sizeof(timestamps), timestamps,
-                                                 sizeof(timestamps[0]), vk::QueryResultFlags());
+                                                 sizeof(timestamps[0]), vk::QueryResultFlagBits::e64);
         assert(res == vk::Result::eSuccess || res == vk::Result::eNotReady || res == vk::Result::eErrorDeviceLost);
 
-        if (res == vk::Result::eNotReady || res == vk::Result::eErrorDeviceLost)
+        if (res != vk::Result::eSuccess)
         {
             return false;
         }
 
-        const auto timestampPeriod = m_Context.physicalDeviceProperties.limits.timestampPeriod; // in nanoseconds
-        const float scale = 1e-9f * timestampPeriod;
+        assert(query->timestampValidBits > 0 && query->timestampValidBits <= 64);
+        query->beginTimestamp = detail::maskTimestamp(timestamps[0], query->timestampValidBits);
+        query->endTimestamp = detail::maskTimestamp(timestamps[1], query->timestampValidBits);
 
-        query->time = float(timestamps[1] - timestamps[0]) * scale;
+        const auto timestampPeriod = m_Context.physicalDeviceProperties.limits.timestampPeriod; // in nanoseconds
+        const double scale = 1e-9 * double(timestampPeriod);
+        const uint64_t elapsedTicks = detail::timestampDelta(
+            query->beginTimestamp, query->endTimestamp, query->timestampValidBits);
+
+        query->time = float(double(elapsedTicks) * scale);
         query->resolved = true;
         return true;
     }
@@ -200,6 +229,20 @@ namespace nvrhi::vulkan
         return query->time;
     }
 
+    bool Device::getTimerQueryTimestampRange(
+        ITimerQuery* _query, TimerQueryTimestampRange& range)
+    {
+        TimerQuery* query = checked_cast<TimerQuery*>(_query);
+
+        if (!query->resolved)
+            return false;
+
+        range.beginTimestamp = query->beginTimestamp;
+        range.endTimestamp = query->endTimestamp;
+        range.timestampValidBits = query->timestampValidBits;
+        return true;
+    }
+
     void Device::resetTimerQuery(ITimerQuery* _query)
     {
         TimerQuery* query = checked_cast<TimerQuery*>(_query);
@@ -207,6 +250,10 @@ namespace nvrhi::vulkan
         query->started = false;
         query->resolved = false;
         query->time = 0.f;
+        query->beginTimestamp = 0;
+        query->endTimestamp = 0;
+        query->timestampValidBits = 0;
+        query->queueFamilyIndex = uint32_t(-1);
     }
 
 

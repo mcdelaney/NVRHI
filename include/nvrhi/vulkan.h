@@ -62,6 +62,17 @@ namespace nvrhi::vulkan
         const VkPipelineStageFlags2* waitStageMasks = nullptr;
     };
 
+    // Raw timestamps captured by a timer query. The timestamp values are
+    // masked to timestampValidBits, as reported by the Vulkan queue family
+    // that recorded the query. Consumers must use modular subtraction when
+    // computing a duration because the counter may wrap between endpoints.
+    struct TimerQueryTimestampRange
+    {
+        uint64_t beginTimestamp = 0;
+        uint64_t endTimestamp = 0;
+        uint32_t timestampValidBits = 0;
+    };
+
     class IDevice : public nvrhi::IDevice
     {
     public:
@@ -117,6 +128,12 @@ namespace nvrhi::vulkan
         virtual void queueWaitForCommandListAtStage(
             CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance,
             VkPipelineStageFlags2 waitStageMask) = 0;
+
+        // Returns the resolved raw timestamp endpoints without waiting,
+        // resetting, or consuming the timer query. Returns false until
+        // pollTimerQuery has resolved the query.
+        virtual bool getTimerQueryTimestampRange(
+            ITimerQuery* query, TimerQueryTimestampRange& range) = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

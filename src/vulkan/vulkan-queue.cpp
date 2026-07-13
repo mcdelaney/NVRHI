@@ -49,6 +49,7 @@ namespace nvrhi::vulkan
         else
         {
             m_QueueFlags = queueFamilies[queueFamilyIndex].queueFlags;
+            m_TimestampValidBits = queueFamilies[queueFamilyIndex].timestampValidBits;
         }
 
         auto semaphoreTypeInfo = vk::SemaphoreTypeCreateInfo()

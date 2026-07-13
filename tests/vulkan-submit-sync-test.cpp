@@ -6,13 +6,21 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <nvrhi/vulkan.h>
 #include "vulkan-queue-utils.h"
+#include "vulkan-timestamp-utils.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
+
+static_assert(nvrhi::vulkan::detail::timestampDelta(0xfffffff0ull, 0x20ull, 32) == 48);
+static_assert(nvrhi::vulkan::detail::timestampDelta(0xfffffffffffffff0ull, 0x20ull, 64) == 48);
+static_assert(nvrhi::vulkan::detail::timestampMask(0) == 0);
 
 namespace
 {
@@ -227,7 +235,8 @@ int main()
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, queueFamilies.data());
         for (uint32_t i = 0; i < queueFamilyCount; ++i)
         {
-            if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0)
+            if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0
+                && queueFamilies[i].timestampValidBits != 0)
             {
                 physicalDevice = candidate;
                 queueFamilyIndex = i;
@@ -542,6 +551,63 @@ int main()
         }
     }
 
+    // Exercise the raw timer range API against an actual Vulkan timestamp
+    // query. Waiting for the queue tracking semaphore guarantees that the
+    // nonblocking poll can resolve without a host-side busy wait.
+    nvrhi::TimerQueryHandle timerQuery = device->createTimerQuery();
+    nvrhi::CommandListHandle timerCommandList = device->createCommandList(
+        nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Graphics));
+    passed &= bool(timerQuery) && bool(timerCommandList);
+    if (timerQuery && timerCommandList)
+    {
+        nvrhi::vulkan::TimerQueryTimestampRange unresolvedRange {};
+        passed &= !device->getTimerQueryTimestampRange(timerQuery, unresolvedRange);
+
+        device->resetTimerQuery(timerQuery);
+        timerCommandList->open();
+        timerCommandList->beginTimerQuery(timerQuery);
+        timerCommandList->endTimerQuery(timerQuery);
+        timerCommandList->close();
+
+        nvrhi::ICommandList* timerPtr = timerCommandList.Get();
+        const uint64_t timerId = device->executeCommandListsWithSyncIsolated(
+            &timerPtr, 1, nvrhi::CommandQueue::Graphics, emptyExtras);
+        passed &= timerId > previousId;
+        previousId = timerId;
+        passed &= waitTimeline(vkDevice, graphicsTracking, timerId);
+
+        const bool timerResolved = device->pollTimerQuery(timerQuery);
+        passed &= timerResolved;
+        if (timerResolved)
+        {
+            nvrhi::vulkan::TimerQueryTimestampRange range {};
+            passed &= device->getTimerQueryTimestampRange(timerQuery, range);
+            passed &= range.timestampValidBits > 0 && range.timestampValidBits <= 64;
+            passed &= range.beginTimestamp
+                == nvrhi::vulkan::detail::maskTimestamp(range.beginTimestamp, range.timestampValidBits);
+            passed &= range.endTimestamp
+                == nvrhi::vulkan::detail::maskTimestamp(range.endTimestamp, range.timestampValidBits);
+
+            VkPhysicalDeviceProperties properties {};
+            vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+            const uint64_t elapsedTicks = nvrhi::vulkan::detail::timestampDelta(
+                range.beginTimestamp, range.endTimestamp, range.timestampValidBits);
+            const double rawSeconds = double(elapsedTicks)
+                * double(properties.limits.timestampPeriod) * 1e-9;
+            const double nvrhiSeconds = double(device->getTimerQueryTime(timerQuery));
+            const double tolerance = std::max(
+                double(properties.limits.timestampPeriod) * 1e-9,
+                std::abs(rawSeconds) * double(std::numeric_limits<float>::epsilon()) * 4.0);
+            passed &= std::abs(nvrhiSeconds - rawSeconds) <= tolerance;
+
+            nvrhi::vulkan::TimerQueryTimestampRange retainedRange {};
+            passed &= device->getTimerQueryTimestampRange(timerQuery, retainedRange);
+            passed &= retainedRange.beginTimestamp == range.beginTimestamp
+                && retainedRange.endTimestamp == range.endTimestamp
+                && retainedRange.timestampValidBits == range.timestampValidBits;
+        }
+    }
+
     VkSemaphore ordered = timeline();
     id = isolatedSignal(ordered, 1);
     passed &= id > previousId;
@@ -557,6 +623,8 @@ int main()
     copyCommandList = nullptr;
     computeCommandList = nullptr;
     graphicsCommandList = nullptr;
+    timerCommandList = nullptr;
+    timerQuery = nullptr;
     bufferA = nullptr;
     bufferB = nullptr;
     readback = nullptr;

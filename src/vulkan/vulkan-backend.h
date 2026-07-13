@@ -288,6 +288,7 @@ namespace nvrhi::vulkan
         bool waitCommandList(uint64_t commandListID, uint64_t timeout);
 
         uint32_t getQueueFamilyIndex() const { return m_QueueFamilyIndex; }
+        uint32_t getTimestampValidBits() const { return m_TimestampValidBits; }
 
         // Internal: push a TrackedCommandBuffer onto the queue's command-
         // buffer pool. Called by CommandListLifetimeTracker after the
@@ -307,6 +308,7 @@ namespace nvrhi::vulkan
         vk::Queue m_Queue;
         CommandQueue m_QueueID;
         uint32_t m_QueueFamilyIndex = uint32_t(-1);
+        uint32_t m_TimestampValidBits = 0;
         vk::QueueFlags m_QueueFlags;
 
         // Protects vk::Queue.submit (Vulkan VkQueue external-sync
@@ -782,6 +784,10 @@ namespace nvrhi::vulkan
         bool started = false;
         bool resolved = false;
         float time = 0.f;
+        uint64_t beginTimestamp = 0;
+        uint64_t endTimestamp = 0;
+        uint32_t timestampValidBits = 0;
+        uint32_t queueFamilyIndex = uint32_t(-1);
 
         explicit TimerQuery(utils::BitSetAllocator& allocator)
             : m_QueryAllocator(allocator)
@@ -1218,6 +1224,8 @@ namespace nvrhi::vulkan
         bool pollTimerQuery(ITimerQuery* query) override;
         float getTimerQueryTime(ITimerQuery* query) override;
         void resetTimerQuery(ITimerQuery* query) override;
+        bool getTimerQueryTimestampRange(
+            ITimerQuery* query, TimerQueryTimestampRange& range) override;
 
         GraphicsAPI getGraphicsAPI() override;
 
