@@ -103,7 +103,8 @@ namespace nvrhi::vulkan
 
         // Submit ppCmd with the per-submit wait/signal extras attached to
         // THIS submit only, BYPASSING the queue accumulator. See SubmitSyncExtras
-        // doc above.
+        // doc above. Returns the nonzero queue timeline ID on success and 0
+        // when Vulkan queue submission fails.
         virtual uint64_t executeCommandListsWithSyncIsolated(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,

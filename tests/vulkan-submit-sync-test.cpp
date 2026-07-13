@@ -49,6 +49,15 @@ namespace
         return VK_FALSE;
     }
 
+    VKAPI_ATTR VkResult VKAPI_CALL failQueueSubmit2(
+        VkQueue,
+        uint32_t,
+        const VkSubmitInfo2*,
+        VkFence)
+    {
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+
     class MessageCallback : public nvrhi::IMessageCallback
     {
     public:
@@ -343,6 +352,44 @@ int main()
             == &device->getQueueMutex(nvrhi::CommandQueue::Compute)
         && &device->getQueueMutex(nvrhi::CommandQueue::Graphics)
             == &device->getQueueMutex(nvrhi::CommandQueue::Copy);
+
+    // An isolated worker submit reports failure as ID 0 without advancing the
+    // queue timeline or consuming the command list. The same closed list can
+    // then be retried after the transient failure is removed.
+    nvrhi::CommandListHandle failureProbe = device->createCommandList(
+        nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Graphics));
+    failureProbe->open();
+    failureProbe->close();
+    auto* failureProbeVk =
+        static_cast<nvrhi::vulkan::CommandList*>(failureProbe.Get());
+    const nvrhi::vulkan::TrackedCommandBuffer* failureProbeBuffer =
+        failureProbeVk->getCurrentCmdBuf().get();
+    auto* concreteDevice = static_cast<nvrhi::vulkan::Device*>(device.Get());
+    nvrhi::vulkan::Queue* graphicsQueue =
+        concreteDevice->getQueue(nvrhi::CommandQueue::Graphics);
+    const uint64_t beforeFailedSubmit = graphicsQueue->getLastSubmittedID();
+    const uint32_t errorsBeforeFailedSubmit = messageCallback.errors;
+    const auto realQueueSubmit2 = VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = failQueueSubmit2;
+    nvrhi::ICommandList* failureProbePtr = failureProbe.Get();
+    nvrhi::vulkan::SubmitSyncExtras failureExtras {};
+    const uint64_t failedSubmitId = device->executeCommandListsWithSyncIsolated(
+        &failureProbePtr, 1, nvrhi::CommandQueue::Graphics, failureExtras);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = realQueueSubmit2;
+    passed &= failedSubmitId == 0;
+    passed &= graphicsQueue->getLastSubmittedID() == beforeFailedSubmit;
+    passed &= failureProbeVk->getCurrentCmdBuf().get() == failureProbeBuffer;
+    passed &= messageCallback.errors == errorsBeforeFailedSubmit + 1;
+    messageCallback.errors = errorsBeforeFailedSubmit;
+
+    const uint64_t retrySubmitId = device->executeCommandListsWithSyncIsolated(
+        &failureProbePtr, 1, nvrhi::CommandQueue::Graphics, failureExtras);
+    passed &= retrySubmitId == beforeFailedSubmit + 1;
+    passed &= failureProbeVk->getCurrentCmdBuf() == nullptr;
+    passed &= waitTimeline(
+        vkDevice,
+        device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
+        retrySubmitId);
 
     VkSemaphore aliasCompletion = timeline();
     auto signalOnQueue = [&](nvrhi::CommandQueue queueType, uint64_t value) {
@@ -751,6 +798,7 @@ int main()
     computeCommandList = nullptr;
     graphicsCommandList = nullptr;
     timerCommandList = nullptr;
+    failureProbe = nullptr;
     timerQuery = nullptr;
     bufferA = nullptr;
     bufferB = nullptr;

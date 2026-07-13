@@ -733,7 +733,7 @@ namespace nvrhi::vulkan
 
         uint64_t submissionID = queue.submit(pCommandLists, numCommandLists);
 
-        for (size_t i = 0; i < numCommandLists; i++)
+        for (size_t i = 0; submissionID != 0 && i < numCommandLists; i++)
         {
             checked_cast<CommandList*>(pCommandLists[i])->executed(
                 queue, executionQueue, submissionID);
@@ -751,7 +751,7 @@ namespace nvrhi::vulkan
 
         uint64_t submissionID = queue.submitWithSyncIsolated(pCommandLists, numCommandLists, extras);
 
-        for (size_t i = 0; i < numCommandLists; i++)
+        for (size_t i = 0; submissionID != 0 && i < numCommandLists; i++)
         {
             checked_cast<CommandList*>(pCommandLists[i])->executed(
                 queue, executionQueue, submissionID);
@@ -769,7 +769,7 @@ namespace nvrhi::vulkan
 
         uint64_t submissionID = queue.submitWithSyncDraining(pCommandLists, numCommandLists, extras);
 
-        for (size_t i = 0; i < numCommandLists; i++)
+        for (size_t i = 0; submissionID != 0 && i < numCommandLists; i++)
         {
             checked_cast<CommandList*>(pCommandLists[i])->executed(
                 queue, executionQueue, submissionID);

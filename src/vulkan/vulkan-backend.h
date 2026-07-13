@@ -250,6 +250,7 @@ namespace nvrhi::vulkan
         // with another submitter that has critical syncs queued via the
         // accumulator (e.g. the swapchain-tail's acquire wait + present
         // signal). The plain submit() drains the accumulator as before.
+        // Returns 0 when Vulkan queue submission fails.
         uint64_t submitWithSyncIsolated(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
 
         // Submit with explicit per-submit waits/signals AND drain the

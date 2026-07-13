@@ -243,7 +243,11 @@ namespace nvrhi::vulkan
 
         std::vector<vk::CommandBufferSubmitInfo> commandBufferInfos(numCmd);
 
-        const uint64_t submissionID = m_LastSubmittedID.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Reserve the next timeline value while holding m_Mutex, but publish it
+        // to observers only after vkQueueSubmit2 succeeds. A failed submit must
+        // return 0 and must not make an unsignaled value look submitted.
+        const uint64_t submissionID =
+            m_LastSubmittedID.load(std::memory_order_relaxed) + 1;
 
         for (size_t i = 0; i < numCmd; i++)
         {
@@ -253,13 +257,6 @@ namespace nvrhi::vulkan
             commandBufferInfos[i] = vk::CommandBufferSubmitInfo()
                 .setCommandBuffer(commandBuffer->cmdBuf)
                 .setDeviceMask(0);
-            commandBuffer->submissionID = submissionID;
-
-            for (const auto& buffer : commandBuffer->referencedStagingBuffers)
-            {
-                buffer->lastUseQueue = m_QueueID;
-                buffer->lastUseCommandListID = submissionID;
-            }
         }
 
         signalSemaphores->push_back(trackingSemaphore);
@@ -293,12 +290,28 @@ namespace nvrhi::vulkan
             .setSignalSemaphoreInfoCount(uint32_t(signalInfos.size()))
             .setPSignalSemaphoreInfos(signalInfos.empty() ? nullptr : signalInfos.data());
 
+        bool submitSucceeded = true;
         try {
             m_Queue.submit2(submitInfo);
         }
         catch (vk::DeviceLostError&)
         {
             m_Context.messageCallback->message(MessageSeverity::Error, "Device Removed!");
+            // Preserve the legacy draining-submit behavior for existing callers,
+            // which treat device loss as fatal and do not implement rollback.
+            // Isolated worker submits have an explicit zero-on-failure contract.
+            submitSucceeded = drainAccumulator;
+        }
+        catch (const vk::SystemError& error)
+        {
+            if (drainAccumulator)
+                throw;
+
+            const std::string message =
+                std::string("Vulkan queue submission failed: ") + error.what();
+            m_Context.messageCallback->message(
+                MessageSeverity::Error, message.c_str());
+            submitSucceeded = false;
         }
 
         if (drainAccumulator)
@@ -306,6 +319,23 @@ namespace nvrhi::vulkan
             m_WaitSemaphores.clear();
             m_SignalSemaphores.clear();
             m_SignalSemaphoreValues.clear();
+        }
+
+        if (!submitSucceeded)
+            return 0;
+
+        m_LastSubmittedID.store(submissionID, std::memory_order_relaxed);
+        for (size_t i = 0; i < numCmd; i++)
+        {
+            CommandList* commandList = checked_cast<CommandList*>(ppCmd[i]);
+            TrackedCommandBufferPtr commandBuffer = commandList->getCurrentCmdBuf();
+            commandBuffer->submissionID = submissionID;
+
+            for (const auto& buffer : commandBuffer->referencedStagingBuffers)
+            {
+                buffer->lastUseQueue = m_QueueID;
+                buffer->lastUseCommandListID = submissionID;
+            }
         }
 
         return submissionID;
