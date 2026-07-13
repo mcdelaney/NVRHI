@@ -356,6 +356,31 @@ namespace nvrhi::vulkan
 
     bool Device::waitForIdle()
     {
+        // vkDeviceWaitIdle is externally synchronized against every VkQueue
+        // created from the device. Queue submit, bindSparse, and application
+        // present/raw-queue calls use these same mutexes. Logical queue labels
+        // may alias one physical Queue object, so lock each wrapper exactly
+        // once in deterministic Graphics -> Compute -> Copy order.
+        std::array<Queue*, uint32_t(CommandQueue::Count)> uniqueQueues {};
+        uint32_t numUniqueQueues = 0;
+        for (uint32_t i = 0; i < uint32_t(CommandQueue::Count); ++i)
+        {
+            Queue* queue = m_Queues[i].get();
+            if (!queue)
+                continue;
+
+            bool seen = false;
+            for (uint32_t j = 0; j < numUniqueQueues; ++j)
+                if (uniqueQueues[j] == queue) { seen = true; break; }
+            if (!seen)
+                uniqueQueues[numUniqueQueues++] = queue;
+        }
+
+        std::array<std::unique_lock<std::mutex>, uint32_t(CommandQueue::Count)>
+            queueLocks {};
+        for (uint32_t i = 0; i < numUniqueQueues; ++i)
+            queueLocks[i] = std::unique_lock<std::mutex>(uniqueQueues[i]->getMutex());
+
         try {
             m_Context.device.waitIdle();
         }

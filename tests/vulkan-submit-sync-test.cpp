@@ -17,6 +17,8 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 static_assert(nvrhi::vulkan::detail::timestampDelta(0xfffffff0ull, 0x20ull, 32) == 48);
@@ -56,6 +58,26 @@ namespace
         VkFence)
     {
         return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+
+    PFN_vkDeviceWaitIdle realDeviceWaitIdle = nullptr;
+    std::mutex* waitIdleQueueMutex = nullptr;
+    bool waitIdleObservedQueueLock = false;
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeDeviceWaitIdle(VkDevice device)
+    {
+        bool probeAcquiredQueueLock = false;
+        std::thread probe([&]() {
+            if (waitIdleQueueMutex && waitIdleQueueMutex->try_lock())
+            {
+                probeAcquiredQueueLock = true;
+                waitIdleQueueMutex->unlock();
+            }
+        });
+        probe.join();
+        waitIdleObservedQueueLock = waitIdleQueueMutex
+            && !probeAcquiredQueueLock;
+        return realDeviceWaitIdle(device);
     }
 
     class MessageCallback : public nvrhi::IMessageCallback
@@ -1019,7 +1041,16 @@ int main()
 
     VkSemaphore tracking = device->getQueueSemaphore(nvrhi::CommandQueue::Graphics);
     passed &= waitTimeline(vkDevice, tracking, previousId);
-    passed &= device->waitForIdle();
+    // vkDeviceWaitIdle is externally synchronized against every VkQueue.
+    // Intercept the driver call and probe from another thread: the aliased
+    // physical queue mutex must already be held when NVRHI enters the driver.
+    realDeviceWaitIdle = VULKAN_HPP_DEFAULT_DISPATCHER.vkDeviceWaitIdle;
+    waitIdleQueueMutex = &device->getQueueMutex(nvrhi::CommandQueue::Graphics);
+    waitIdleObservedQueueLock = false;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDeviceWaitIdle = probeDeviceWaitIdle;
+    const bool waitForIdlePassed = device->waitForIdle();
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDeviceWaitIdle = realDeviceWaitIdle;
+    passed &= waitForIdlePassed && waitIdleObservedQueueLock;
 
     copyCommandList = nullptr;
     computeCommandList = nullptr;
