@@ -113,6 +113,20 @@ namespace nvrhi
 
             return requiredState;
         }
+
+        bool isValidResolvedTextureRange(
+            const TextureStateExtension* texture,
+            const TextureSubresourceSet& subresources)
+        {
+            return subresources.numMipLevels > 0
+                && subresources.baseMipLevel < texture->descRef.mipLevels
+                && subresources.numMipLevels
+                    <= texture->descRef.mipLevels - subresources.baseMipLevel
+                && subresources.numArraySlices > 0
+                && subresources.baseArraySlice < texture->descRef.arraySize
+                && subresources.numArraySlices
+                    <= texture->descRef.arraySize - subresources.baseArraySlice;
+        }
     }
 
     bool verifyPermanentResourceState(ResourceStates permanentState, ResourceStates requiredState, bool isTexture, const std::string& debugName, IMessageCallback* messageCallback)
@@ -662,6 +676,200 @@ namespace nvrhi
             (transitionNecessary || uavNecessary)
                 && !coalescedPendingUavBarrier);
         tracking->state = state;
+    }
+
+    bool CommandListResourceStateTracker::addTextureMemoryDependency(
+        TextureStateExtension* texture,
+        TextureSubresourceSet subresources,
+        ResourceStates state,
+        ShaderType shaderStagesBefore,
+        ShaderType shaderStagesAfter)
+    {
+        if (state == ResourceStates::Unknown)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Texture memory dependency state must be known");
+            return false;
+        }
+        if (texture->permanentState != ResourceStates::Unknown)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Texture memory dependency cannot target a permanent-state texture");
+            return false;
+        }
+
+        TextureState* tracking = getTextureStateTracking(texture, false);
+        if (!tracking || tracking->permanentTransition)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                tracking
+                    ? "Texture memory dependency cannot follow a pending permanent-state transition"
+                    : "Texture memory dependency requires an explicitly tracked state");
+            return false;
+        }
+
+        subresources = subresources.resolve(texture->descRef, false);
+        if (!isValidResolvedTextureRange(texture, subresources))
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Texture memory dependency subresource range is empty or out of bounds");
+            return false;
+        }
+        const auto stateMatches = [&](MipLevel mipLevel, ArraySlice arraySlice) {
+            if (tracking->subresourceStates.empty())
+                return tracking->state == state;
+            return tracking->subresourceStates[
+                calcSubresource(mipLevel, arraySlice, texture->descRef)] == state;
+        };
+
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                if (!stateMatches(mipLevel, arraySlice))
+                {
+                    m_MessageCallback->message(
+                        MessageSeverity::Error,
+                        "Texture memory dependency state does not match every tracked subresource");
+                    return false;
+                }
+            }
+        }
+
+        const ShaderType requestedBefore =
+            normalizeShaderStages(state, shaderStagesBefore);
+        const ShaderType requestedAfter =
+            normalizeShaderStages(state, shaderStagesAfter);
+
+        if (subresources.isEntireTexture(texture->descRef)
+            && tracking->subresourceStates.empty())
+        {
+            TextureBarrier barrier;
+            barrier.texture = texture;
+            barrier.entireTexture = true;
+            barrier.stateBefore = state;
+            barrier.stateAfter = state;
+            barrier.shaderStagesBefore =
+                tracking->shaderStages | requestedBefore;
+            barrier.shaderStagesAfter = requestedAfter;
+            m_TextureBarriers.push_back(barrier);
+            tracking->shaderStages = requestedAfter;
+        }
+        else
+        {
+            if (tracking->subresourceStates.empty())
+            {
+                tracking->subresourceStates.resize(
+                    texture->descRef.mipLevels * texture->descRef.arraySize,
+                    tracking->state);
+                tracking->subresourceShaderStages.resize(
+                    texture->descRef.mipLevels * texture->descRef.arraySize,
+                    tracking->shaderStages);
+                tracking->state = ResourceStates::Unknown;
+                tracking->shaderStages = ShaderType::None;
+            }
+
+            for (ArraySlice arraySlice = subresources.baseArraySlice;
+                 arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+                 ++arraySlice)
+            {
+                for (MipLevel mipLevel = subresources.baseMipLevel;
+                     mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                     ++mipLevel)
+                {
+                    const uint32_t subresource = calcSubresource(
+                        mipLevel, arraySlice, texture->descRef);
+                    TextureBarrier barrier;
+                    barrier.texture = texture;
+                    barrier.mipLevel = mipLevel;
+                    barrier.arraySlice = arraySlice;
+                    barrier.entireTexture = false;
+                    barrier.stateBefore = state;
+                    barrier.stateAfter = state;
+                    barrier.shaderStagesBefore =
+                        tracking->subresourceShaderStages[subresource]
+                        | requestedBefore;
+                    barrier.shaderStagesAfter = requestedAfter;
+                    m_TextureBarriers.push_back(barrier);
+                    tracking->subresourceShaderStages[subresource] =
+                        requestedAfter;
+                }
+            }
+        }
+
+        if ((state & ResourceStates::UnorderedAccess) != 0)
+            tracking->firstUavBarrierPlaced = true;
+        return true;
+    }
+
+    bool CommandListResourceStateTracker::addBufferMemoryDependency(
+        BufferStateExtension* buffer,
+        ResourceStates state,
+        ShaderType shaderStagesBefore,
+        ShaderType shaderStagesAfter)
+    {
+        if (state == ResourceStates::Unknown)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Buffer memory dependency state must be known");
+            return false;
+        }
+        if (buffer->descRef.isVolatile
+            || buffer->descRef.cpuAccess != CpuAccessMode::None)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Buffer memory dependency does not support volatile or CPU-visible buffers");
+            return false;
+        }
+        if (buffer->permanentState != ResourceStates::Unknown)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Buffer memory dependency cannot target a permanent-state buffer");
+            return false;
+        }
+
+        BufferState* tracking = getBufferStateTracking(buffer, false);
+        if (!tracking || tracking->permanentTransition)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                tracking
+                    ? "Buffer memory dependency cannot follow a pending permanent-state transition"
+                    : "Buffer memory dependency requires an explicitly tracked state");
+            return false;
+        }
+        if (tracking->state != state)
+        {
+            m_MessageCallback->message(
+                MessageSeverity::Error,
+                "Buffer memory dependency state does not match the tracked state");
+            return false;
+        }
+
+        BufferBarrier barrier;
+        barrier.buffer = buffer;
+        barrier.stateBefore = state;
+        barrier.stateAfter = state;
+        barrier.shaderStagesBefore = tracking->shaderStages
+            | normalizeShaderStages(state, shaderStagesBefore);
+        barrier.shaderStagesAfter =
+            normalizeShaderStages(state, shaderStagesAfter);
+        m_BufferBarriers.push_back(barrier);
+        tracking->shaderStages = barrier.shaderStagesAfter;
+        if ((state & ResourceStates::UnorderedAccess) != 0)
+            tracking->firstUavBarrierPlaced = true;
+        return true;
     }
 
     void CommandListResourceStateTracker::keepBufferInitialStates()

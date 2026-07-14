@@ -66,6 +66,8 @@ namespace nvrhi::vulkan
         // here when Vulkan guarantees that nothing was submitted. Reopening
         // would overwrite recording-version state that must instead be retried.
         assert(!m_CurrentCmdBuf && "Cannot reopen an unsubmitted command list");
+        assert(!m_IsRecording);
+        assert(!m_PendingBarriersAreMemoryDependencies);
 
         m_ReleasedTextureRanges.clear();
         m_ReleasedBuffers.clear();
@@ -76,6 +78,7 @@ namespace nvrhi::vulkan
             .setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
 
         (void)m_CurrentCmdBuf->cmdBuf.begin(&beginInfo);
+        m_IsRecording = true;
         m_CurrentCmdBuf->referencedResources.push_back(this); // prevent deletion of e.g. UploadManager
 
         clearState();
@@ -83,7 +86,13 @@ namespace nvrhi::vulkan
 
     void CommandList::close()
     {
+        assert(m_IsRecording);
         endRenderPass();
+
+        // Explicit same-state dependencies form their own batch. Emit it
+        // before keepInitialState restoration can append later transitions.
+        if (m_PendingBarriersAreMemoryDependencies)
+            commitBarriers();
 
         m_StateTracker.keepBufferInitialStates();
         m_StateTracker.keepTextureInitialStates();
@@ -97,6 +106,7 @@ namespace nvrhi::vulkan
 #endif
 
         m_CurrentCmdBuf->cmdBuf.end();
+        m_IsRecording = false;
 
         m_ReleasedTextureRanges.clear();
         m_ReleasedBuffers.clear();

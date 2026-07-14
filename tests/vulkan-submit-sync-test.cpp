@@ -640,6 +640,7 @@ int main()
         // same-family transfer collapses to one ordinary transition.
         {
             const nvrhi::vulkan::QueueOwnershipTransferDesc defaultTransfer {};
+            const nvrhi::vulkan::MemoryDependencyDesc defaultDependency {};
             nvrhi::TextureDesc ownershipTextureDesc {};
             ownershipTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
             const auto ownershipBefore = nvrhi::vulkan::convertTextureState(
@@ -679,11 +680,14 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 27
+            mappingPassed &= nvrhi::c_HeaderVersion == 28
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
                 && defaultTransfer.stateAfter == nvrhi::ResourceStates::Unknown
+                && defaultDependency.state == nvrhi::ResourceStates::Unknown
+                && defaultDependency.shaderStagesBefore == nvrhi::ShaderType::All
+                && defaultDependency.shaderStagesAfter == nvrhi::ShaderType::All
                 && imageRelease.srcStageMask
                     == vk::PipelineStageFlagBits2::eTransfer
                 && imageRelease.srcAccessMask
@@ -1210,6 +1214,198 @@ int main()
                 && laterBarriers[0].stateBefore == nvrhi::ResourceStates::UnorderedAccess
                 && laterBarriers[0].stateAfter == nvrhi::ResourceStates::CopySource
                 && laterBarriers[0].shaderStagesBefore == uavStages;
+        }
+
+        // Explicit dependencies preserve resource state while resetting the
+        // outstanding stage scope to the declared destination.
+        {
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            trackerPassed &= tracker.addBufferMemoryDependency(
+                &trackerBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+            const auto& barriers = tracker.getBufferBarriers();
+            trackerPassed &= barriers.size() == 1
+                && barriers[0].stateBefore == nvrhi::ResourceStates::CopyDest
+                && barriers[0].stateAfter == nvrhi::ResourceStates::CopyDest
+                && barriers[0].shaderStagesBefore == nvrhi::ShaderType::None
+                && barriers[0].shaderStagesAfter == nvrhi::ShaderType::None;
+        }
+
+        {
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Compute);
+            trackerPassed &= tracker.addBufferMemoryDependency(
+                &trackerBuffer,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Pixel,
+                nvrhi::ShaderType::Pixel);
+            const auto& dependencyBarriers = tracker.getBufferBarriers();
+            trackerPassed &= dependencyBarriers.size() == 1
+                && dependencyBarriers[0].shaderStagesBefore
+                    == stageUnion(
+                        nvrhi::ShaderType::Compute,
+                        nvrhi::ShaderType::Pixel)
+                && dependencyBarriers[0].shaderStagesAfter
+                    == nvrhi::ShaderType::Pixel;
+
+            tracker.clearBarriers();
+            tracker.requireBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Compute);
+            const auto& laterBarriers = tracker.getBufferBarriers();
+            trackerPassed &= laterBarriers.size() == 1
+                && laterBarriers[0].shaderStagesBefore
+                    == nvrhi::ShaderType::Pixel
+                && laterBarriers[0].shaderStagesAfter
+                    == nvrhi::ShaderType::Compute;
+        }
+
+        // A dependency on one mip resets only that mip's stage frontier.
+        {
+            nvrhi::TextureDesc dependencyTextureDesc {};
+            dependencyTextureDesc.width = 4;
+            dependencyTextureDesc.height = 4;
+            dependencyTextureDesc.mipLevels = 2;
+            dependencyTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            dependencyTextureDesc.debugName = "MemoryDependencyTrackerTexture";
+            nvrhi::TextureStateExtension dependencyTexture(
+                dependencyTextureDesc);
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingTextureState(
+                &dependencyTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Compute);
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            trackerPassed &= tracker.addTextureMemoryDependency(
+                &dependencyTexture,
+                mip0,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Pixel,
+                nvrhi::ShaderType::Pixel);
+            const auto& barriers = tracker.getTextureBarriers();
+            trackerPassed &= barriers.size() == 1
+                && !barriers[0].entireTexture
+                && barriers[0].mipLevel == 0
+                && barriers[0].shaderStagesBefore
+                    == stageUnion(
+                        nvrhi::ShaderType::Compute,
+                        nvrhi::ShaderType::Pixel)
+                && barriers[0].shaderStagesAfter
+                    == nvrhi::ShaderType::Pixel
+                && tracker.getTextureSubresourceShaderStages(
+                    &dependencyTexture, 0, 0)
+                    == nvrhi::ShaderType::Pixel
+                && tracker.getTextureSubresourceShaderStages(
+                    &dependencyTexture, 0, 1)
+                    == nvrhi::ShaderType::Compute;
+        }
+
+        // A same-state declaration following a pending dependency widens the
+        // dependency destination instead of appending a duplicate barrier.
+        {
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Compute);
+            trackerPassed &= tracker.addBufferMemoryDependency(
+                &trackerBuffer,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Compute,
+                nvrhi::ShaderType::Compute);
+            tracker.requireBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::ShaderResource,
+                nvrhi::ShaderType::Pixel);
+            const auto& barriers = tracker.getBufferBarriers();
+            trackerPassed &= barriers.size() == 1
+                && barriers[0].shaderStagesAfter
+                    == stageUnion(
+                        nvrhi::ShaderType::Compute,
+                        nvrhi::ShaderType::Pixel);
+        }
+
+        // Tracker-level validation must reject missing or divergent state,
+        // permanent lifetimes, pending permanent transitions, and bad ranges.
+        {
+            const uint32_t errorsBefore = messageCallback.errors;
+
+            nvrhi::BufferStateExtension untrackedBuffer(trackerBufferDesc);
+            nvrhi::CommandListResourceStateTracker untrackedTracker(
+                &messageCallback);
+            trackerPassed &= !untrackedTracker.addBufferMemoryDependency(
+                &untrackedBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+
+            nvrhi::BufferStateExtension mismatchBuffer(trackerBufferDesc);
+            nvrhi::CommandListResourceStateTracker mismatchTracker(
+                &messageCallback);
+            mismatchTracker.beginTrackingBufferState(
+                &mismatchBuffer, nvrhi::ResourceStates::CopyDest);
+            trackerPassed &= !mismatchTracker.addBufferMemoryDependency(
+                &mismatchBuffer,
+                nvrhi::ResourceStates::CopySource,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+
+            nvrhi::BufferStateExtension permanentBuffer(trackerBufferDesc);
+            permanentBuffer.permanentState = nvrhi::ResourceStates::CopyDest;
+            nvrhi::CommandListResourceStateTracker permanentTracker(
+                &messageCallback);
+            trackerPassed &= !permanentTracker.addBufferMemoryDependency(
+                &permanentBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+
+            nvrhi::BufferStateExtension pendingBuffer(trackerBufferDesc);
+            nvrhi::CommandListResourceStateTracker pendingTracker(
+                &messageCallback);
+            pendingTracker.beginTrackingBufferState(
+                &pendingBuffer, nvrhi::ResourceStates::Common);
+            pendingTracker.setPermanentBufferState(
+                &pendingBuffer, nvrhi::ResourceStates::CopyDest);
+            trackerPassed &= !pendingTracker.addBufferMemoryDependency(
+                &pendingBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+
+            nvrhi::TextureDesc rangeTextureDesc {};
+            rangeTextureDesc.width = 4;
+            rangeTextureDesc.height = 4;
+            rangeTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            nvrhi::TextureStateExtension rangeTexture(rangeTextureDesc);
+            nvrhi::CommandListResourceStateTracker rangeTracker(
+                &messageCallback);
+            rangeTracker.beginTrackingTextureState(
+                &rangeTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::CopyDest);
+            const nvrhi::TextureSubresourceSet outOfRange(
+                rangeTextureDesc.mipLevels, 1, 0, 1);
+            trackerPassed &= !rangeTracker.addTextureMemoryDependency(
+                &rangeTexture,
+                outOfRange,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None,
+                nvrhi::ShaderType::None);
+
+            trackerPassed &= messageCallback.errors == errorsBefore + 5;
+            messageCallback.errors = errorsBefore;
         }
 
         passed &= trackerPassed;
@@ -2016,6 +2212,326 @@ int main()
         passed &= computeReuseId > copyReuseId;
         passed &= waitTimeline(vkDevice, uploadReuseTimeline, uploadReuseValue2);
         previousId = computeReuseId;
+    }
+
+    // Real same-state dependencies: two transfer writes target each resource
+    // without a state transition between them. SyncVal observes the WAW
+    // hazards, and the readbacks prove that the second writes won.
+    {
+        constexpr std::array<uint32_t, 4> firstDependencyWords {{
+            0x01010101u, 0x02020202u, 0x03030303u, 0x04040404u
+        }};
+        constexpr std::array<uint32_t, 4> secondDependencyWords {{
+            0xa1a1a1a1u, 0xb2b2b2b2u, 0xc3c3c3c3u, 0xd4d4d4d4u
+        }};
+        constexpr uint32_t dependencyTextureWidth = 4;
+        constexpr uint32_t dependencyTextureHeight = 4;
+        constexpr std::array<uint32_t,
+            dependencyTextureWidth * dependencyTextureHeight>
+            firstDependencyTexels {{
+                0x00000001u, 0x00000002u, 0x00000003u, 0x00000004u,
+                0x00000005u, 0x00000006u, 0x00000007u, 0x00000008u,
+                0x00000009u, 0x0000000au, 0x0000000bu, 0x0000000cu,
+                0x0000000du, 0x0000000eu, 0x0000000fu, 0x00000010u,
+            }};
+        constexpr std::array<uint32_t,
+            dependencyTextureWidth * dependencyTextureHeight>
+            secondDependencyTexels {{
+                0x10000001u, 0x10000002u, 0x10000003u, 0x10000004u,
+                0x10000005u, 0x10000006u, 0x10000007u, 0x10000008u,
+                0x10000009u, 0x1000000au, 0x1000000bu, 0x1000000cu,
+                0x1000000du, 0x1000000eu, 0x1000000fu, 0x10000010u,
+            }};
+
+        nvrhi::BufferDesc dependencyBufferDesc {};
+        dependencyBufferDesc.byteSize = sizeof(secondDependencyWords);
+        dependencyBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        dependencyBufferDesc.keepInitialState = false;
+        dependencyBufferDesc.debugName = "SameStateDependencyBuffer";
+        nvrhi::BufferHandle dependencyBuffer =
+            device->createBuffer(dependencyBufferDesc);
+
+        nvrhi::BufferDesc dependencyReadbackDesc {};
+        dependencyReadbackDesc.byteSize = sizeof(secondDependencyWords);
+        dependencyReadbackDesc.cpuAccess = nvrhi::CpuAccessMode::Read;
+        dependencyReadbackDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        dependencyReadbackDesc.keepInitialState = true;
+        dependencyReadbackDesc.debugName =
+            "SameStateDependencyBufferReadback";
+        nvrhi::BufferHandle dependencyReadback =
+            device->createBuffer(dependencyReadbackDesc);
+
+        nvrhi::TextureDesc dependencyTextureDesc {};
+        dependencyTextureDesc.width = dependencyTextureWidth;
+        dependencyTextureDesc.height = dependencyTextureHeight;
+        dependencyTextureDesc.format = nvrhi::Format::R32_UINT;
+        dependencyTextureDesc.initialState = nvrhi::ResourceStates::Common;
+        dependencyTextureDesc.keepInitialState = false;
+        dependencyTextureDesc.debugName = "SameStateDependencyTexture";
+        nvrhi::TextureHandle dependencyTexture =
+            device->createTexture(dependencyTextureDesc);
+        dependencyTextureDesc.debugName =
+            "SameStateDependencyTextureReadback";
+        nvrhi::StagingTextureHandle dependencyTextureReadback =
+            device->createStagingTexture(
+                dependencyTextureDesc, nvrhi::CpuAccessMode::Read);
+
+        nvrhi::CommandListHandle dependencyCommandList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Copy));
+        const bool dependencyResourcesCreated = dependencyBuffer
+            && dependencyReadback
+            && dependencyTexture
+            && dependencyTextureReadback
+            && dependencyCommandList;
+        passed &= dependencyResourcesCreated;
+        if (dependencyResourcesCreated)
+        {
+            nvrhi::vulkan::MemoryDependencyDesc dependency {};
+            dependency.setState(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::None)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            const nvrhi::TextureSlice textureSlice {};
+            constexpr size_t textureRowPitch =
+                dependencyTextureWidth * sizeof(uint32_t);
+            constexpr size_t textureDepthPitch =
+                textureRowPitch * dependencyTextureHeight;
+
+            dependencyCommandList->open();
+            dependencyCommandList->beginTrackingBufferState(
+                dependencyBuffer,
+                nvrhi::ResourceStates::Common,
+                nvrhi::ShaderType::None);
+            dependencyCommandList->beginTrackingTextureState(
+                dependencyTexture,
+                mip0,
+                nvrhi::ResourceStates::Common,
+                nvrhi::ShaderType::None);
+            dependencyCommandList->writeBuffer(
+                dependencyBuffer,
+                firstDependencyWords.data(),
+                sizeof(firstDependencyWords));
+            dependencyCommandList->writeTexture(
+                dependencyTexture,
+                0,
+                0,
+                firstDependencyTexels.data(),
+                textureRowPitch,
+                textureDepthPitch);
+
+            // Keep both dependencies pending together, then emit the bounded
+            // pre-node batch explicitly before either second write.
+            passed &= device->addBufferMemoryDependency(
+                dependencyCommandList, dependencyBuffer, dependency);
+            passed &= device->addTextureMemoryDependency(
+                dependencyCommandList, dependencyTexture, mip0, dependency);
+            dependencyCommandList->commitBarriers();
+
+            dependencyCommandList->writeBuffer(
+                dependencyBuffer,
+                secondDependencyWords.data(),
+                sizeof(secondDependencyWords));
+            dependencyCommandList->writeTexture(
+                dependencyTexture,
+                0,
+                0,
+                secondDependencyTexels.data(),
+                textureRowPitch,
+                textureDepthPitch);
+            dependencyCommandList->copyBuffer(
+                dependencyReadback,
+                0,
+                dependencyBuffer,
+                0,
+                sizeof(secondDependencyWords));
+            dependencyCommandList->copyTexture(
+                dependencyTextureReadback,
+                textureSlice,
+                dependencyTexture,
+                textureSlice);
+            dependencyCommandList->close();
+
+            nvrhi::ICommandList* dependencyCommandListPtr =
+                dependencyCommandList.Get();
+            const uint64_t dependencySubmitId =
+                device->executeCommandListsWithSyncIsolated(
+                    &dependencyCommandListPtr,
+                    1,
+                    nvrhi::CommandQueue::Copy,
+                    emptyExtras);
+            passed &= dependencySubmitId > previousId;
+            previousId = dependencySubmitId;
+            passed &= waitTimeline(
+                vkDevice,
+                device->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+                dependencySubmitId);
+
+            void* dependencyBufferData =
+                device->mapBuffer(
+                    dependencyReadback, nvrhi::CpuAccessMode::Read);
+            passed &= dependencyBufferData != nullptr;
+            if (dependencyBufferData)
+            {
+                passed &= std::memcmp(
+                    dependencyBufferData,
+                    secondDependencyWords.data(),
+                    sizeof(secondDependencyWords)) == 0;
+                device->unmapBuffer(dependencyReadback);
+            }
+
+            size_t dependencyReadbackRowPitch = 0;
+            void* dependencyTextureData = device->mapStagingTexture(
+                dependencyTextureReadback,
+                textureSlice,
+                nvrhi::CpuAccessMode::Read,
+                &dependencyReadbackRowPitch);
+            passed &= dependencyTextureData != nullptr
+                && dependencyReadbackRowPitch >= textureRowPitch;
+            if (dependencyTextureData)
+            {
+                for (uint32_t row = 0;
+                     row < dependencyTextureHeight;
+                     ++row)
+                {
+                    passed &= std::memcmp(
+                        static_cast<const uint8_t*>(dependencyTextureData)
+                            + row * dependencyReadbackRowPitch,
+                        secondDependencyTexels.data()
+                            + row * dependencyTextureWidth,
+                        textureRowPitch) == 0;
+                }
+                device->unmapStagingTexture(dependencyTextureReadback);
+            }
+        }
+    }
+
+    // Public validation failures must be rejected before any Vulkan command is
+    // recorded. Restore the expected diagnostic count afterward so the final
+    // test epilogue still detects only unexpected NVRHI failures.
+    {
+        const uint32_t errorsBeforeRejections = messageCallback.errors;
+
+        nvrhi::BufferDesc rejectionBufferDesc {};
+        rejectionBufferDesc.byteSize = 16;
+        rejectionBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        rejectionBufferDesc.keepInitialState = false;
+        rejectionBufferDesc.debugName = "MemoryDependencyRejectionBuffer";
+        nvrhi::BufferHandle rejectionBuffer =
+            device->createBuffer(rejectionBufferDesc);
+
+        nvrhi::TextureDesc rejectionTextureDesc {};
+        rejectionTextureDesc.width = 4;
+        rejectionTextureDesc.height = 4;
+        rejectionTextureDesc.mipLevels = 2;
+        rejectionTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        rejectionTextureDesc.initialState = nvrhi::ResourceStates::Common;
+        rejectionTextureDesc.keepInitialState = false;
+        rejectionTextureDesc.debugName = "MemoryDependencyRejectionTexture";
+        nvrhi::TextureHandle rejectionTexture =
+            device->createTexture(rejectionTextureDesc);
+
+        nvrhi::BufferDesc cpuBufferDesc {};
+        cpuBufferDesc.byteSize = 16;
+        cpuBufferDesc.cpuAccess = nvrhi::CpuAccessMode::Read;
+        cpuBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        cpuBufferDesc.keepInitialState = false;
+        cpuBufferDesc.debugName = "MemoryDependencyCpuBuffer";
+        nvrhi::BufferHandle cpuBuffer = device->createBuffer(cpuBufferDesc);
+
+        nvrhi::CommandListHandle rejectionList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Copy));
+        passed &= rejectionBuffer
+            && rejectionTexture
+            && cpuBuffer
+            && rejectionList;
+        if (rejectionBuffer && rejectionTexture && cpuBuffer && rejectionList)
+        {
+            nvrhi::vulkan::MemoryDependencyDesc copyDependency {};
+            copyDependency.setState(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::None)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+            // Closed command list.
+            passed &= !device->addBufferMemoryDependency(
+                rejectionList, rejectionBuffer, copyDependency);
+
+            rejectionList->open();
+            rejectionList->beginTrackingBufferState(
+                rejectionBuffer,
+                nvrhi::ResourceStates::Common,
+                nvrhi::ShaderType::None);
+            rejectionList->beginTrackingTextureState(
+                rejectionTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::Common,
+                nvrhi::ShaderType::None);
+
+            // Unknown state and tracked-state mismatch.
+            passed &= !device->addBufferMemoryDependency(
+                rejectionList,
+                rejectionBuffer,
+                nvrhi::vulkan::MemoryDependencyDesc {});
+            passed &= !device->addBufferMemoryDependency(
+                rejectionList, rejectionBuffer, copyDependency);
+
+            // Empty/out-of-range texture range.
+            const nvrhi::TextureSubresourceSet outOfRange(
+                rejectionTextureDesc.mipLevels, 1, 0, 1);
+            passed &= !device->addTextureMemoryDependency(
+                rejectionList,
+                rejectionTexture,
+                outOfRange,
+                copyDependency);
+
+            // The selected range is tracked, but only mip 0 matches. The API
+            // must validate every subresource rather than accepting the
+            // legacy tracker's any-matching-subresource predicate.
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            rejectionList->setTextureState(
+                rejectionTexture,
+                mip0,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            passed &= !device->addTextureMemoryDependency(
+                rejectionList,
+                rejectionTexture,
+                nvrhi::AllSubresources,
+                copyDependency);
+
+            // Pending permanent transition and CPU-visible buffer.
+            rejectionList->setPermanentBufferState(
+                rejectionBuffer, nvrhi::ResourceStates::CopyDest);
+            passed &= !device->addBufferMemoryDependency(
+                rejectionList, rejectionBuffer, copyDependency);
+            rejectionList->beginTrackingBufferState(
+                cpuBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            passed &= !device->addBufferMemoryDependency(
+                rejectionList, cpuBuffer, copyDependency);
+
+            rejectionList->close();
+            nvrhi::ICommandList* rejectionListPtr = rejectionList.Get();
+            const uint64_t rejectionSubmitId =
+                device->executeCommandListsWithSyncIsolated(
+                    &rejectionListPtr,
+                    1,
+                    nvrhi::CommandQueue::Copy,
+                    emptyExtras);
+            passed &= rejectionSubmitId > previousId;
+            previousId = rejectionSubmitId;
+            passed &= waitTimeline(
+                vkDevice,
+                device->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+                rejectionSubmitId);
+        }
+
+        passed &= messageCallback.errors == errorsBeforeRejections + 7;
+        messageCallback.errors = errorsBeforeRejections;
     }
 
     // Public QFOT smoke test. This test device aliases every logical queue to

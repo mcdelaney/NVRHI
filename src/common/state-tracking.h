@@ -126,6 +126,12 @@ namespace nvrhi
             ResourceStates state, ShaderType shaderStages = ShaderType::All);
         void requireBufferState(BufferStateExtension* buffer, ResourceStates state,
             ShaderType shaderStages = ShaderType::All);
+        bool addTextureMemoryDependency(TextureStateExtension* texture,
+            TextureSubresourceSet subresources, ResourceStates state,
+            ShaderType shaderStagesBefore, ShaderType shaderStagesAfter);
+        bool addBufferMemoryDependency(BufferStateExtension* buffer,
+            ResourceStates state, ShaderType shaderStagesBefore,
+            ShaderType shaderStagesAfter);
 
         void keepBufferInitialStates();
         void keepTextureInitialStates();

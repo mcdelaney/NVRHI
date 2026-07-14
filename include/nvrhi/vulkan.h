@@ -84,6 +84,22 @@ namespace nvrhi::vulkan
         QueueOwnershipTransferDesc& setShaderStagesAfter(ShaderType value) { shaderStagesAfter = value; return *this; }
     };
 
+    // Describes an explicit Vulkan memory dependency that preserves the
+    // resource state and, for textures, the image layout. The resource must
+    // already be explicitly tracked in exactly state. shaderStagesBefore is
+    // unioned with every outstanding local access recorded by the state
+    // tracker; shaderStagesAfter becomes the new outstanding local scope.
+    struct MemoryDependencyDesc
+    {
+        ResourceStates state = ResourceStates::Unknown;
+        ShaderType shaderStagesBefore = ShaderType::All;
+        ShaderType shaderStagesAfter = ShaderType::All;
+
+        MemoryDependencyDesc& setState(ResourceStates value) { state = value; return *this; }
+        MemoryDependencyDesc& setShaderStagesBefore(ShaderType value) { shaderStagesBefore = value; return *this; }
+        MemoryDependencyDesc& setShaderStagesAfter(ShaderType value) { shaderStagesAfter = value; return *this; }
+    };
+
     // Raw timestamps captured by a timer query. The timestamp values are
     // masked to timestampValidBits, as reported by the Vulkan queue family
     // that recorded the query. Consumers must use modular subtraction when
@@ -172,6 +188,21 @@ namespace nvrhi::vulkan
         virtual void queueWaitForCommandListAtStage(
             CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance,
             VkPipelineStageFlags2 waitStageMask) = 0;
+
+        // Adds a mandatory same-state dependency to an open Vulkan command
+        // list. These calls are intended for graph-managed resources
+        // (keepInitialState == false and no permanent state). Older pending
+        // transitions are emitted first so the same-state dependency cannot
+        // accidentally share their pipelineBarrier2 batch. The dependency
+        // itself remains pending: call ICommandList::commitBarriers before
+        // invoking code that records the dependent commands.
+        virtual bool addTextureMemoryDependency(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const MemoryDependencyDesc& dependency) = 0;
+        virtual bool addBufferMemoryDependency(
+            ICommandList* commandList, IBuffer* buffer,
+            const MemoryDependencyDesc& dependency) = 0;
 
         // Records one half of a queue-family ownership transfer. These calls
         // are valid only for exclusive, NVRHI-managed, graph-tracked resources

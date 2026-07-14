@@ -21,6 +21,7 @@
 */
 
 #include "vulkan-backend.h"
+#include "vulkan-queue-utils.h"
 #include <nvrhi/common/misc.h>
 
 namespace nvrhi::vulkan
@@ -167,7 +168,7 @@ namespace nvrhi::vulkan
             context.error("Queue ownership transfer command list belongs to a different device");
             return false;
         }
-        if (!commandList->getCurrentCmdBuf())
+        if (!commandList->isRecording())
         {
             context.error("Queue ownership transfers must be recorded on an open command list");
             return false;
@@ -434,6 +435,39 @@ namespace nvrhi::vulkan
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
+        // Same-state declarations can widen/coalesce a pending explicit
+        // dependency before it is emitted. A real state transition must begin
+        // after the explicit dependency batch instead of sharing that batch.
+        if (m_PendingBarriersAreMemoryDependencies)
+        {
+            const TextureSubresourceSet resolved =
+                subresources.resolve(texture->desc, false);
+            bool sameState = isValidResolvedTextureRange(texture, resolved)
+                && m_StateTracker.isTextureStateTracked(texture, resolved);
+            for (ArraySlice arraySlice = resolved.baseArraySlice;
+                 sameState
+                    && arraySlice < resolved.baseArraySlice + resolved.numArraySlices;
+                 ++arraySlice)
+            {
+                for (MipLevel mipLevel = resolved.baseMipLevel;
+                     mipLevel < resolved.baseMipLevel + resolved.numMipLevels;
+                     ++mipLevel)
+                {
+                    if (m_StateTracker.getTextureSubresourceState(
+                            texture, arraySlice, mipLevel) != state)
+                    {
+                        sameState = false;
+                        break;
+                    }
+                }
+            }
+            if (!sameState)
+            {
+                endRenderPass();
+                commitBarriersInternal();
+            }
+        }
+
         if (isTextureRangeReleased(texture, subresources))
         {
             reportReleasedResourceUse("texture", texture->desc.debugName);
@@ -450,6 +484,16 @@ namespace nvrhi::vulkan
         ShaderType shaderStages)
     {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
+
+        if (m_PendingBarriersAreMemoryDependencies)
+        {
+            if (!m_StateTracker.isBufferStateTracked(buffer)
+                || m_StateTracker.getBufferState(buffer) != state)
+            {
+                endRenderPass();
+                commitBarriersInternal();
+            }
+        }
 
         if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
         {
@@ -596,6 +640,7 @@ namespace nvrhi::vulkan
         bufferBarriers.clear();
 
         m_StateTracker.clearBarriers();
+        m_PendingBarriersAreMemoryDependencies = false;
     }
 
     void CommandList::commitBarriers()
@@ -625,6 +670,12 @@ namespace nvrhi::vulkan
         if (!texture)
         {
             m_Context.error("Queue ownership transfer texture is null");
+            return false;
+        }
+        if (!texture->belongsTo(m_Context))
+        {
+            m_Context.error(
+                "Queue ownership transfer texture belongs to a different device");
             return false;
         }
         if (texture->queueSharingMode == QueueSharingMode::Concurrent)
@@ -757,6 +808,12 @@ namespace nvrhi::vulkan
         if (!buffer)
         {
             m_Context.error("Queue ownership transfer buffer is null");
+            return false;
+        }
+        if (!buffer->belongsTo(m_Context))
+        {
+            m_Context.error(
+                "Queue ownership transfer buffer belongs to a different device");
             return false;
         }
         if (buffer->queueSharingMode == QueueSharingMode::Concurrent)
@@ -916,6 +973,299 @@ namespace nvrhi::vulkan
             vulkanBuffer, transfer, false);
     }
 
+    bool CommandList::recordTextureMemoryDependency(
+        Texture* texture,
+        TextureSubresourceSet subresources,
+        const MemoryDependencyDesc& dependency)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error(
+                "Texture memory dependencies must be added to an open command list");
+            return false;
+        }
+        if (!texture)
+        {
+            m_Context.error("Texture memory dependency texture is null");
+            return false;
+        }
+        if (!texture->belongsTo(m_Context))
+        {
+            m_Context.error(
+                "Texture memory dependency texture belongs to a different device");
+            return false;
+        }
+        if (dependency.state == ResourceStates::Unknown)
+        {
+            m_Context.error("Texture memory dependency state must be known");
+            return false;
+        }
+        if (texture->desc.keepInitialState)
+        {
+            m_Context.error(
+                "Texture memory dependency textures must disable keepInitialState");
+            return false;
+        }
+        if (texture->permanentState != ResourceStates::Unknown)
+        {
+            m_Context.error(
+                "Texture memory dependency cannot target a permanent-state texture");
+            return false;
+        }
+        if (m_StateTracker.hasPendingPermanentTextureState(texture))
+        {
+            m_Context.error(
+                "Texture memory dependency cannot follow a pending permanent-state texture transition");
+            return false;
+        }
+
+        subresources = subresources.resolve(texture->desc, false);
+        if (!isValidResolvedTextureRange(texture, subresources))
+        {
+            m_Context.error(
+                "Texture memory dependency subresource range is empty or out of bounds");
+            return false;
+        }
+        if (isTextureRangeReleased(texture, subresources))
+        {
+            reportReleasedResourceUse("texture", texture->desc.debugName);
+            return false;
+        }
+        if (!m_StateTracker.isTextureStateTracked(texture, subresources))
+        {
+            m_Context.error(
+                "Texture memory dependency requires an explicitly tracked state");
+            return false;
+        }
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                if (m_StateTracker.getTextureSubresourceState(
+                        texture, arraySlice, mipLevel) != dependency.state)
+                {
+                    m_Context.error(
+                        "Texture memory dependency state does not match every tracked subresource");
+                    return false;
+                }
+            }
+        }
+
+        const ResourceStateMapping after = convertTextureState(
+            dependency.state, texture->desc, dependency.shaderStagesAfter);
+        if (after.imageLayout == vk::ImageLayout::eUndefined)
+        {
+            m_Context.error(
+                "Texture memory dependency state must map to a concrete image layout");
+            return false;
+        }
+        Queue* recordingQueue =
+            m_Device->getQueue(m_CommandListParameters.queueType);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                after.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error(
+                "Texture memory dependency destination stage scope is unsupported by the recording queue family");
+            return false;
+        }
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                const ShaderType effectiveBefore =
+                    dependency.shaderStagesBefore
+                    | m_StateTracker.getTextureSubresourceShaderStages(
+                        texture, arraySlice, mipLevel);
+                const ResourceStateMapping before = convertTextureState(
+                    dependency.state, texture->desc, effectiveBefore);
+                if (before.imageLayout == vk::ImageLayout::eUndefined
+                    || !detail::isWaitStageMaskSupported(
+                        before.stageFlags, recordingQueue->getQueueFlags()))
+                {
+                    m_Context.error(
+                        "Texture memory dependency source stage scope is unsupported by the recording queue family");
+                    return false;
+                }
+            }
+        }
+
+        endRenderPass();
+        if (anyBarriers() && !m_PendingBarriersAreMemoryDependencies)
+            commitBarriersInternal();
+        if (!m_StateTracker.addTextureMemoryDependency(
+                texture, subresources, dependency.state,
+                dependency.shaderStagesBefore,
+                dependency.shaderStagesAfter))
+        {
+            return false;
+        }
+
+        m_PendingBarriersAreMemoryDependencies = true;
+        m_CurrentCmdBuf->referencedResources.push_back(texture);
+        return true;
+    }
+
+    bool CommandList::recordBufferMemoryDependency(
+        Buffer* buffer,
+        const MemoryDependencyDesc& dependency)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error(
+                "Buffer memory dependencies must be added to an open command list");
+            return false;
+        }
+        if (!buffer)
+        {
+            m_Context.error("Buffer memory dependency buffer is null");
+            return false;
+        }
+        if (!buffer->belongsTo(m_Context))
+        {
+            m_Context.error(
+                "Buffer memory dependency buffer belongs to a different device");
+            return false;
+        }
+        if (dependency.state == ResourceStates::Unknown)
+        {
+            m_Context.error("Buffer memory dependency state must be known");
+            return false;
+        }
+        if (buffer->desc.keepInitialState)
+        {
+            m_Context.error(
+                "Buffer memory dependency buffers must disable keepInitialState");
+            return false;
+        }
+        if (buffer->permanentState != ResourceStates::Unknown)
+        {
+            m_Context.error(
+                "Buffer memory dependency cannot target a permanent-state buffer");
+            return false;
+        }
+        if (m_StateTracker.hasPendingPermanentBufferState(buffer))
+        {
+            m_Context.error(
+                "Buffer memory dependency cannot follow a pending permanent-state buffer transition");
+            return false;
+        }
+        if (buffer->desc.isVolatile
+            || buffer->desc.cpuAccess != CpuAccessMode::None)
+        {
+            m_Context.error(
+                "Buffer memory dependency does not support volatile or CPU-visible buffers");
+            return false;
+        }
+        if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
+        {
+            reportReleasedResourceUse("buffer", buffer->desc.debugName);
+            return false;
+        }
+        if (!m_StateTracker.isBufferStateTracked(buffer))
+        {
+            m_Context.error(
+                "Buffer memory dependency requires an explicitly tracked state");
+            return false;
+        }
+        if (m_StateTracker.getBufferState(buffer) != dependency.state)
+        {
+            m_Context.error(
+                "Buffer memory dependency state does not match the tracked state");
+            return false;
+        }
+
+        Queue* recordingQueue =
+            m_Device->getQueue(m_CommandListParameters.queueType);
+        const ShaderType effectiveBefore = dependency.shaderStagesBefore
+            | m_StateTracker.getBufferShaderStages(buffer);
+        const ResourceStateMapping before = convertResourceState(
+            dependency.state, false, false, false, effectiveBefore);
+        const ResourceStateMapping after = convertResourceState(
+            dependency.state, false, false, false,
+            dependency.shaderStagesAfter);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                before.stageFlags, recordingQueue->getQueueFlags())
+            || !detail::isWaitStageMaskSupported(
+                after.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error(
+                "Buffer memory dependency stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        endRenderPass();
+        if (anyBarriers() && !m_PendingBarriersAreMemoryDependencies)
+            commitBarriersInternal();
+        if (!m_StateTracker.addBufferMemoryDependency(
+                buffer, dependency.state,
+                dependency.shaderStagesBefore,
+                dependency.shaderStagesAfter))
+        {
+            return false;
+        }
+
+        m_PendingBarriersAreMemoryDependencies = true;
+        m_CurrentCmdBuf->referencedResources.push_back(buffer);
+        return true;
+    }
+
+    bool Device::addTextureMemoryDependency(
+        ICommandList* commandList,
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        const MemoryDependencyDesc& dependency)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Texture* vulkanTexture = dynamic_cast<Texture*>(texture);
+        if (!vulkanCommandList || !vulkanTexture)
+        {
+            m_Context.error(
+                "Texture memory dependency requires Vulkan command-list and texture objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Texture memory dependency command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->recordTextureMemoryDependency(
+            vulkanTexture, subresources, dependency);
+    }
+
+    bool Device::addBufferMemoryDependency(
+        ICommandList* commandList,
+        IBuffer* buffer,
+        const MemoryDependencyDesc& dependency)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Buffer* vulkanBuffer = dynamic_cast<Buffer*>(buffer);
+        if (!vulkanCommandList || !vulkanBuffer)
+        {
+            m_Context.error(
+                "Buffer memory dependency requires Vulkan command-list and buffer objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Buffer memory dependency command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->recordBufferMemoryDependency(
+            vulkanBuffer, dependency);
+    }
+
     void CommandList::beginTrackingTextureState(ITexture* _texture, TextureSubresourceSet subresources, ResourceStates stateBits)
     {
         beginTrackingTextureState(
@@ -1024,6 +1374,12 @@ namespace nvrhi::vulkan
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
+        if (m_PendingBarriersAreMemoryDependencies)
+        {
+            endRenderPass();
+            commitBarriersInternal();
+        }
+
         if (isTextureRangeReleased(texture, AllSubresources))
         {
             reportReleasedResourceUse("texture", texture->desc.debugName);
@@ -1039,6 +1395,12 @@ namespace nvrhi::vulkan
     void CommandList::setPermanentBufferState(IBuffer* _buffer, ResourceStates stateBits)
     {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
+
+        if (m_PendingBarriersAreMemoryDependencies)
+        {
+            endRenderPass();
+            commitBarriersInternal();
+        }
 
         if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
         {

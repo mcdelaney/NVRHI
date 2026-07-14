@@ -332,6 +332,7 @@ namespace nvrhi::vulkan
         bool waitCommandList(uint64_t commandListID, uint64_t timeout);
 
         uint32_t getQueueFamilyIndex() const { return m_QueueFamilyIndex; }
+        vk::QueueFlags getQueueFlags() const { return m_QueueFlags; }
         uint32_t getTimestampValidBits() const { return m_TimestampValidBits; }
 
         // Internal: push a TrackedCommandBuffer onto the queue's command-
@@ -565,6 +566,7 @@ namespace nvrhi::vulkan
         const TextureDesc& getDesc() const override { return desc; }
         Object getNativeObject(ObjectType objectType) override;
         Object getNativeView(ObjectType objectType, Format format, TextureSubresourceSet subresources, TextureDimension dimension, bool isReadOnlyDSV = false) override;
+        bool belongsTo(const VulkanContext& context) const { return &m_Context == &context; }
 
     private:
         const VulkanContext& m_Context;
@@ -705,6 +707,7 @@ namespace nvrhi::vulkan
         const BufferDesc& getDesc() const override { return desc; }
         GpuVirtualAddress getGpuVirtualAddress() const override { return deviceAddress; }
         Object getNativeObject(ObjectType type) override;
+        bool belongsTo(const VulkanContext& context) const { return &m_Context == &context; }
 
     private:
         const VulkanContext& m_Context;
@@ -1362,6 +1365,13 @@ namespace nvrhi::vulkan
         bool acquireBufferQueueOwnership(
             ICommandList* commandList, IBuffer* buffer,
             const QueueOwnershipTransferDesc& transfer) override;
+        bool addTextureMemoryDependency(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const MemoryDependencyDesc& dependency) override;
+        bool addBufferMemoryDependency(
+            ICommandList* commandList, IBuffer* buffer,
+            const MemoryDependencyDesc& dependency) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
@@ -1410,6 +1420,11 @@ namespace nvrhi::vulkan
         bool recordBufferQueueOwnershipTransfer(
             Buffer* buffer, const QueueOwnershipTransferDesc& transfer,
             bool release);
+        bool recordTextureMemoryDependency(
+            Texture* texture, TextureSubresourceSet subresources,
+            const MemoryDependencyDesc& dependency);
+        bool recordBufferMemoryDependency(
+            Buffer* buffer, const MemoryDependencyDesc& dependency);
 
         // IResource implementation
 
@@ -1510,6 +1525,7 @@ namespace nvrhi::vulkan
         const CommandListParameters& getDesc() override { return m_CommandListParameters; }
 
         TrackedCommandBufferPtr getCurrentCmdBuf() const { return m_CurrentCmdBuf; }
+        bool isRecording() const { return m_IsRecording; }
 
     private:
         Device* m_Device;
@@ -1519,9 +1535,11 @@ namespace nvrhi::vulkan
 
         CommandListResourceStateTracker m_StateTracker;
         bool m_EnableAutomaticBarriers = true;
+        bool m_PendingBarriersAreMemoryDependencies = false;
 
         // current internal command buffer
         TrackedCommandBufferPtr m_CurrentCmdBuf = nullptr;
+        bool m_IsRecording = false;
 
 #if NVRHI_WITH_AFTERMATH
         AftermathMarkerTracker m_AftermathTracker;
