@@ -685,10 +685,10 @@ int main()
             nvrhi::Format nvrhiFormat;
         };
         constexpr std::array<DepthFormatCandidate, 4> depthFormatCandidates {{
-            { VK_FORMAT_D32_SFLOAT, nvrhi::Format::D32 },
-            { VK_FORMAT_D24_UNORM_S8_UINT, nvrhi::Format::D24S8 },
-            { VK_FORMAT_D16_UNORM, nvrhi::Format::D16 },
             { VK_FORMAT_D32_SFLOAT_S8_UINT, nvrhi::Format::D32S8 },
+            { VK_FORMAT_D24_UNORM_S8_UINT, nvrhi::Format::D24S8 },
+            { VK_FORMAT_D32_SFLOAT, nvrhi::Format::D32 },
+            { VK_FORMAT_D16_UNORM, nvrhi::Format::D16 },
         }};
 
         nvrhi::Format depthFormat = nvrhi::Format::UNKNOWN;
@@ -758,6 +758,10 @@ int main()
             ? device->createFramebuffer(
                 nvrhi::FramebufferDesc().setDepthAttachment(wholeDepthAttachment))
             : nvrhi::FramebufferHandle {};
+        nvrhi::FramebufferHandle writableDepthFramebuffer = wholeDepthTexture
+            ? device->createFramebuffer(
+                nvrhi::FramebufferDesc().setDepthAttachment(wholeDepthTexture))
+            : nvrhi::FramebufferHandle {};
 
         const nvrhi::TextureSubresourceSet secondMip(1, 1, 0, 1);
         nvrhi::FramebufferAttachment mipDepthAttachment {};
@@ -773,16 +777,35 @@ int main()
         bool sampledDepthTrackingPassed = depthFormat != nvrhi::Format::UNKNOWN
             && wholeDepthTexture && mipDepthTexture && depthBindingLayout
             && wholeDepthSet && optedOutDepthSet && mipDepthSet
-            && wholeDepthFramebuffer && mipDepthFramebuffer && depthCommandList;
+            && wholeDepthFramebuffer && writableDepthFramebuffer
+            && mipDepthFramebuffer && depthCommandList;
         if (sampledDepthTrackingPassed)
         {
             const auto* wholeVkSet = static_cast<const nvrhi::vulkan::BindingSet*>(
                 wholeDepthSet.Get());
             const auto* optedOutVkSet = static_cast<const nvrhi::vulkan::BindingSet*>(
                 optedOutDepthSet.Get());
+            const auto* wholeVkFramebuffer =
+                static_cast<const nvrhi::vulkan::Framebuffer*>(
+                    wholeDepthFramebuffer.Get());
+            const auto* writableVkFramebuffer =
+                static_cast<const nvrhi::vulkan::Framebuffer*>(
+                    writableDepthFramebuffer.Get());
             sampledDepthTrackingPassed =
                 wholeVkSet->hasDepthReadOnlyAttachmentBindings
-                && !optedOutVkSet->hasDepthReadOnlyAttachmentBindings;
+                && !optedOutVkSet->hasDepthReadOnlyAttachmentBindings
+                && wholeVkFramebuffer->depthAttachment.storeOp
+                    == vk::AttachmentStoreOp::eNone
+                && writableVkFramebuffer->depthAttachment.storeOp
+                    == vk::AttachmentStoreOp::eStore;
+            if (nvrhi::getFormatInfo(depthFormat).hasStencil)
+            {
+                sampledDepthTrackingPassed &=
+                    wholeVkFramebuffer->stencilAttachment.storeOp
+                        == vk::AttachmentStoreOp::eNone
+                    && writableVkFramebuffer->stencilAttachment.storeOp
+                        == vk::AttachmentStoreOp::eStore;
+            }
 
             depthCommandList->open();
             depthCommandList->beginTrackingTextureState(

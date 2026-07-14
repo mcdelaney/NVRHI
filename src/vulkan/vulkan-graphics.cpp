@@ -108,7 +108,13 @@ namespace nvrhi::vulkan
                 .setImageView(view.view)
                 .setImageLayout(depthLayout)
                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
-                .setStoreOp(vk::AttachmentStoreOp::eStore);
+                // STORE is a depth/stencil write for synchronization purposes,
+                // even when the attachment layout and pipeline are read-only.
+                // NONE leaves the existing contents untouched and accurately
+                // describes a depth-test-only rendering scope (core in 1.3).
+                .setStoreOp(desc.depthAttachment.isReadOnly
+                    ? vk::AttachmentStoreOp::eNone
+                    : vk::AttachmentStoreOp::eStore);
 
             if (getFormatInfo(texture->desc.format).hasStencil)
                 fb->stencilAttachment = fb->depthAttachment;
