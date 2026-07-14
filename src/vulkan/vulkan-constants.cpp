@@ -166,6 +166,27 @@ namespace nvrhi::vulkan
         return vk::PipelineStageFlags2(result);
     }
 
+    ShaderType resolveBindingBarrierShaderStages(
+        ShaderType layoutVisibility,
+        ShaderType pipelineStages)
+    {
+        if (layoutVisibility == ShaderType::None
+            || pipelineStages == ShaderType::None)
+        {
+            return ShaderType::All;
+        }
+
+        if (pipelineStages == ShaderType::All)
+            return layoutVisibility;
+        if (layoutVisibility == ShaderType::All)
+            return pipelineStages;
+
+        const ShaderType intersection = layoutVisibility & pipelineStages;
+        return intersection == ShaderType::None
+            ? ShaderType::All
+            : intersection;
+    }
+
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType)
     {
         if (shaderType == ShaderType::All)

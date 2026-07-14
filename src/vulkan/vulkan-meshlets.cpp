@@ -70,14 +70,14 @@ namespace nvrhi::vulkan
         {
             shaderStages.push_back(makeShaderStageCreateInfo(AS, 
                 specInfos, specMapEntries, specData));
-            pso->shaderMask = pso->shaderMask | ShaderType::Vertex;
+            pso->shaderMask = pso->shaderMask | ShaderType::Amplification;
         }
 
         if (desc.MS)
         {
             shaderStages.push_back(makeShaderStageCreateInfo(MS, 
                 specInfos, specMapEntries, specData));
-            pso->shaderMask = pso->shaderMask | ShaderType::Hull;
+            pso->shaderMask = pso->shaderMask | ShaderType::Mesh;
         }
         
         if (desc.PS)

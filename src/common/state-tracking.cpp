@@ -297,8 +297,24 @@ namespace nvrhi
             bool transitionNecessary = tracking->state != effectiveState;
             bool uavNecessary = ((effectiveState & ResourceStates::UnorderedAccess) != 0)
                 && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
+            bool coalescedPendingUavBarrier = false;
 
-            if (transitionNecessary || uavNecessary)
+            if (!transitionNecessary && uavNecessary)
+            {
+                for (TextureBarrier& barrier : m_TextureBarriers)
+                {
+                    if (barrier.texture == texture
+                        && barrier.stateAfter == effectiveState)
+                    {
+                        barrier.shaderStagesAfter =
+                            barrier.shaderStagesAfter | effectiveShaderStages;
+                        coalescedPendingUavBarrier = true;
+                    }
+                }
+            }
+
+            if ((transitionNecessary || uavNecessary)
+                && !coalescedPendingUavBarrier)
             {
                 TextureBarrier barrier;
                 barrier.texture = texture;
@@ -309,7 +325,7 @@ namespace nvrhi
                 barrier.shaderStagesAfter = effectiveShaderStages;
                 m_TextureBarriers.push_back(barrier);
             }
-            else
+            else if (!transitionNecessary && !uavNecessary)
             {
                 // A prior transition into this state may still be pending.
                 // Widen its destination stage so every declared first use is
@@ -328,10 +344,12 @@ namespace nvrhi
             tracking->shaderStages = advanceOutstandingShaderStages(
                 tracking->shaderStages,
                 effectiveShaderStages,
-                transitionNecessary || uavNecessary);
+                (transitionNecessary || uavNecessary)
+                    && !coalescedPendingUavBarrier);
             tracking->state = effectiveState;
 
-            if (uavNecessary && !transitionNecessary)
+            if (uavNecessary && !transitionNecessary
+                && !coalescedPendingUavBarrier)
             {
                 tracking->firstUavBarrierPlaced = true;
             }
@@ -381,8 +399,28 @@ namespace nvrhi
                     bool transitionNecessary = priorState != effectiveState;
                     bool uavNecessary = ((effectiveState & ResourceStates::UnorderedAccess) != 0)
                         && !anyUavBarrier && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
+                    bool coalescedPendingUavBarrier = false;
 
-                    if (transitionNecessary || uavNecessary)
+                    if (!transitionNecessary && uavNecessary)
+                    {
+                        for (TextureBarrier& barrier : m_TextureBarriers)
+                        {
+                            const bool coversSubresource = barrier.entireTexture
+                                || (barrier.mipLevel == mipLevel
+                                    && barrier.arraySlice == arraySlice);
+                            if (barrier.texture == texture
+                                && coversSubresource
+                                && barrier.stateAfter == effectiveState)
+                            {
+                                barrier.shaderStagesAfter =
+                                    barrier.shaderStagesAfter | effectiveShaderStages;
+                                coalescedPendingUavBarrier = true;
+                            }
+                        }
+                    }
+
+                    if ((transitionNecessary || uavNecessary)
+                        && !coalescedPendingUavBarrier)
                     {
                         TextureBarrier barrier;
                         barrier.texture = texture;
@@ -395,7 +433,7 @@ namespace nvrhi
                         barrier.shaderStagesAfter = effectiveShaderStages;
                         m_TextureBarriers.push_back(barrier);
                     }
-                    else
+                    else if (!transitionNecessary && !uavNecessary)
                     {
                         for (TextureBarrier& barrier : m_TextureBarriers)
                         {
@@ -416,10 +454,12 @@ namespace nvrhi
                         advanceOutstandingShaderStages(
                             priorShaderStages,
                             effectiveShaderStages,
-                            transitionNecessary || uavNecessary);
+                            (transitionNecessary || uavNecessary)
+                                && !coalescedPendingUavBarrier);
                     tracking->subresourceStates[subresourceIndex] = effectiveState;
 
-                    if (uavNecessary && !transitionNecessary)
+                    if (uavNecessary && !transitionNecessary
+                        && !coalescedPendingUavBarrier)
                     {
                         anyUavBarrier = true;
                         tracking->firstUavBarrierPlaced = true;
@@ -466,6 +506,20 @@ namespace nvrhi
         bool transitionNecessary = tracking->state != state;
         bool uavNecessary = ((state & ResourceStates::UnorderedAccess) != 0)
             && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
+        bool coalescedPendingUavBarrier = false;
+
+        if (!transitionNecessary && uavNecessary)
+        {
+            for (BufferBarrier& barrier : m_BufferBarriers)
+            {
+                if (barrier.buffer == buffer && barrier.stateAfter == state)
+                {
+                    barrier.shaderStagesAfter =
+                        barrier.shaderStagesAfter | effectiveShaderStages;
+                    coalescedPendingUavBarrier = true;
+                }
+            }
+        }
 
         if (transitionNecessary)
         {
@@ -486,7 +540,8 @@ namespace nvrhi
             }
         }
 
-        if (transitionNecessary || uavNecessary)
+        if ((transitionNecessary || uavNecessary)
+            && !coalescedPendingUavBarrier)
         {
             BufferBarrier barrier;
             barrier.buffer = buffer;
@@ -496,7 +551,7 @@ namespace nvrhi
             barrier.shaderStagesAfter = effectiveShaderStages;
             m_BufferBarriers.push_back(barrier);
         }
-        else
+        else if (!transitionNecessary && !uavNecessary)
         {
             for (BufferBarrier& barrier : m_BufferBarriers)
             {
@@ -508,7 +563,8 @@ namespace nvrhi
             }
         }
 
-        if (uavNecessary && !transitionNecessary)
+        if (uavNecessary && !transitionNecessary
+            && !coalescedPendingUavBarrier)
         {
             tracking->firstUavBarrierPlaced = true;
         }
@@ -516,7 +572,8 @@ namespace nvrhi
         tracking->shaderStages = advanceOutstandingShaderStages(
             tracking->shaderStages,
             effectiveShaderStages,
-            transitionNecessary || uavNecessary);
+            (transitionNecessary || uavNecessary)
+                && !coalescedPendingUavBarrier);
         tracking->state = state;
     }
 

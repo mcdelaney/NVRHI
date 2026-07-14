@@ -64,7 +64,7 @@ namespace nvrhi
 {
     // Version of the public API provided by NVRHI.
     // Increment this when any changes to the API are made.
-    static constexpr uint32_t c_HeaderVersion = 25;
+    static constexpr uint32_t c_HeaderVersion = 26;
 
     // Verifies that the version of the implementation matches the version of the header.
     // Returns true if they match. Use this when initializing apps using NVRHI as a shared library.
@@ -3231,6 +3231,13 @@ namespace nvrhi
         // preserves the original conservative behavior.
         bool collapseComputeOnlyBarrierStages = false;
 
+        // Vulkan only. When true, binding-set-derived resource transitions use
+        // the layout visibility intersected with the active pipeline's shader
+        // stages. This applies to both automatic transitions and explicit
+        // setResourceStatesForBindingSet calls. The default false preserves
+        // ALL_COMMANDS for legacy shader-visible transitions.
+        bool enableStageQualifiedBindingBarriers = false;
+
         CommandListParameters& setEnableImmediateExecution(bool value) { enableImmediateExecution = value; return *this; }
         CommandListParameters& setUploadChunkSize(size_t value) { uploadChunkSize = value; return *this; }
         CommandListParameters& setScratchChunkSize(size_t value) { scratchChunkSize = value; return *this; }
@@ -3238,6 +3245,7 @@ namespace nvrhi
         CommandListParameters& setQueueType(CommandQueue value) { queueType = value; return *this; }
         CommandListParameters& setLifetimeTracker(ICommandListLifetimeTracker* value) { lifetimeTracker = value; return *this; }
         CommandListParameters& setCollapseComputeOnlyBarrierStages(bool value) { collapseComputeOnlyBarrierStages = value; return *this; }
+        CommandListParameters& setEnableStageQualifiedBindingBarriers(bool value) { enableStageQualifiedBindingBarriers = value; return *this; }
     };
 
     //////////////////////////////////////////////////////////////////////////

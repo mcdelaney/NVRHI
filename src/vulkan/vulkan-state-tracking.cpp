@@ -28,12 +28,14 @@ namespace nvrhi::vulkan
     
     void CommandList::setResourceStatesForBindingSet(IBindingSet* _bindingSet)
     {
-        setResourceStatesForBindingSetInternal(_bindingSet, false);
+        setResourceStatesForBindingSetInternal(
+            _bindingSet, false, ShaderType::All);
     }
 
     void CommandList::setResourceStatesForBindingSetInternal(
         IBindingSet* _bindingSet,
-        bool automaticOnly)
+        bool automaticOnly,
+        ShaderType pipelineStages)
     {
         if (_bindingSet == nullptr)
             return;
@@ -41,6 +43,14 @@ namespace nvrhi::vulkan
             return; // is bindless
 
         BindingSet* bindingSet = checked_cast<BindingSet*>(_bindingSet);
+        ShaderType shaderStages = ShaderType::All;
+        if (m_CommandListParameters.enableStageQualifiedBindingBarriers)
+        {
+            BindingLayout* layout = checked_cast<BindingLayout*>(
+                bindingSet->layout.Get());
+            shaderStages = resolveBindingBarrierShaderStages(
+                layout->desc.visibility, pipelineStages);
+        }
 
         for (auto bindingIndex : bindingSet->bindingsThatNeedTransitions)
         {
@@ -52,31 +62,31 @@ namespace nvrhi::vulkan
             switch(binding.type)  // NOLINT(clang-diagnostic-switch-enum)
             {
                 case ResourceType::Texture_SRV:
-                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, getTextureSrvState(binding));
+                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, getTextureSrvState(binding), shaderStages);
                     break;
 
                 case ResourceType::Texture_UAV:
-                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, ResourceStates::UnorderedAccess);
+                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, ResourceStates::UnorderedAccess, shaderStages);
                     break;
 
                 case ResourceType::TypedBuffer_SRV:
                 case ResourceType::StructuredBuffer_SRV:
                 case ResourceType::RawBuffer_SRV:
-                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::ShaderResource);
+                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::ShaderResource, shaderStages);
                     break;
 
                 case ResourceType::TypedBuffer_UAV:
                 case ResourceType::StructuredBuffer_UAV:
                 case ResourceType::RawBuffer_UAV:
-                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::UnorderedAccess);
+                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::UnorderedAccess, shaderStages);
                     break;
 
                 case ResourceType::ConstantBuffer:
-                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::ConstantBuffer);
+                    requireBufferState(checked_cast<IBuffer*>(binding.resourceHandle), ResourceStates::ConstantBuffer, shaderStages);
                     break;
 
                 case ResourceType::RayTracingAccelStruct:
-                    requireBufferState(checked_cast<AccelStruct*>(binding.resourceHandle)->dataBuffer, ResourceStates::AccelStructRead);
+                    requireBufferState(checked_cast<AccelStruct*>(binding.resourceHandle)->dataBuffer, ResourceStates::AccelStructRead, shaderStages);
 
                 default:
                     // do nothing
@@ -85,12 +95,26 @@ namespace nvrhi::vulkan
         }
     }
 
-    void CommandList::insertResourceBarriersForBindingSets(const BindingSetVector& newBindings, const BindingSetVector& oldBindings)
+    void CommandList::insertResourceBarriersForBindingSets(
+        const BindingSetVector& newBindings,
+        const BindingSetVector& oldBindings,
+        ShaderType pipelineStages,
+        ShaderType previousPipelineStages)
     {
         uint32_t bindingUpdateMask = 0;
 
         if (m_BindingStatesDirty)
             bindingUpdateMask = ~0u;
+
+        // The same binding set can be consumed by different active shader
+        // stages when its layout visibility is broad. Revisit every set so
+        // the state tracker unions those outstanding reads and widens any
+        // still-pending destination barrier.
+        if (m_CommandListParameters.enableStageQualifiedBindingBarriers
+            && pipelineStages != previousPipelineStages)
+        {
+            bindingUpdateMask = ~0u;
+        }
 
         if (bindingUpdateMask == 0)
             bindingUpdateMask = arrayDifferenceMask(newBindings, oldBindings);
@@ -105,13 +129,24 @@ namespace nvrhi::vulkan
             bool const updateThisSet = (bindingUpdateMask & (1u << i)) != 0;
             bool const refreshUavBarriers = bindingUpdateMask != 0 && bindingSet->hasUavBindings;
             if (updateThisSet || refreshUavBarriers || bindingSet->hasDepthReadOnlyAttachmentBindings)
-                setResourceStatesForBindingSetInternal(newBindings[i], true);
+                setResourceStatesForBindingSetInternal(
+                    newBindings[i], true, pipelineStages);
         }
     }
 
     void CommandList::insertGraphicsResourceBarriers(const GraphicsState& state)
     {
-        insertResourceBarriersForBindingSets(state.bindings, m_CurrentGraphicsState.bindings);
+        const ShaderType pipelineStages = state.pipeline
+            ? checked_cast<GraphicsPipeline*>(state.pipeline)->shaderMask
+            : ShaderType::All;
+        const ShaderType previousPipelineStages = m_CurrentGraphicsState.pipeline
+            ? checked_cast<GraphicsPipeline*>(m_CurrentGraphicsState.pipeline)->shaderMask
+            : ShaderType::All;
+        insertResourceBarriersForBindingSets(
+            state.bindings,
+            m_CurrentGraphicsState.bindings,
+            pipelineStages,
+            previousPipelineStages);
 
         if (state.indexBuffer.buffer && (m_BindingStatesDirty || state.indexBuffer.buffer != m_CurrentGraphicsState.indexBuffer.buffer))
         {
@@ -141,7 +176,11 @@ namespace nvrhi::vulkan
 
     void CommandList::insertComputeResourceBarriers(const ComputeState& state)
     {
-        insertResourceBarriersForBindingSets(state.bindings, m_CurrentComputeState.bindings);
+        insertResourceBarriersForBindingSets(
+            state.bindings,
+            m_CurrentComputeState.bindings,
+            ShaderType::Compute,
+            ShaderType::Compute);
 
         if (state.indirectParams && (m_BindingStatesDirty || state.indirectParams != m_CurrentComputeState.indirectParams))
         {
@@ -155,7 +194,17 @@ namespace nvrhi::vulkan
 
     void CommandList::insertMeshletResourceBarriers(const MeshletState& state)
     {
-        insertResourceBarriersForBindingSets(state.bindings, m_CurrentMeshletState.bindings);
+        const ShaderType pipelineStages = state.pipeline
+            ? checked_cast<MeshletPipeline*>(state.pipeline)->shaderMask
+            : ShaderType::All;
+        const ShaderType previousPipelineStages = m_CurrentMeshletState.pipeline
+            ? checked_cast<MeshletPipeline*>(m_CurrentMeshletState.pipeline)->shaderMask
+            : ShaderType::All;
+        insertResourceBarriersForBindingSets(
+            state.bindings,
+            m_CurrentMeshletState.bindings,
+            pipelineStages,
+            previousPipelineStages);
 
         if (m_BindingStatesDirty || m_CurrentMeshletState.framebuffer != state.framebuffer)
         {
@@ -172,23 +221,35 @@ namespace nvrhi::vulkan
 
     void CommandList::insertRayTracingResourceBarriers(const rt::State& state)
     {
-        insertResourceBarriersForBindingSets(state.bindings, m_CurrentRayTracingState.bindings);
+        insertResourceBarriersForBindingSets(
+            state.bindings,
+            m_CurrentRayTracingState.bindings,
+            ShaderType::AllRayTracing,
+            ShaderType::AllRayTracing);
 
         m_BindingStatesDirty = false;
     }
 
-    void CommandList::requireTextureState(ITexture* _texture, TextureSubresourceSet subresources, ResourceStates state)
+    void CommandList::requireTextureState(
+        ITexture* _texture,
+        TextureSubresourceSet subresources,
+        ResourceStates state,
+        ShaderType shaderStages)
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
-        m_StateTracker.requireTextureState(texture, subresources, state);
+        m_StateTracker.requireTextureState(
+            texture, subresources, state, shaderStages);
     }
 
-    void CommandList::requireBufferState(IBuffer* _buffer, ResourceStates state)
+    void CommandList::requireBufferState(
+        IBuffer* _buffer,
+        ResourceStates state,
+        ShaderType shaderStages)
     {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
-        m_StateTracker.requireBufferState(buffer, state);
+        m_StateTracker.requireBufferState(buffer, state, shaderStages);
     }
 
     bool CommandList::anyBarriers() const

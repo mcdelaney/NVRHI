@@ -490,7 +490,8 @@ int main()
             false, false, false, nvrhi::ShaderType::Pixel);
 
         bool mappingPassed =
-            legacySrv.stageFlags == vk::PipelineStageFlagBits2::eAllCommands
+            !nvrhi::CommandListParameters {}.enableStageQualifiedBindingBarriers
+            && legacySrv.stageFlags == vk::PipelineStageFlagBits2::eAllCommands
             && computeSrv.stageFlags == vk::PipelineStageFlagBits2::eComputeShader
             && fragmentSrv.stageFlags == vk::PipelineStageFlagBits2::eFragmentShader
             && computeUav.stageFlags == vk::PipelineStageFlagBits2::eComputeShader
@@ -509,6 +510,34 @@ int main()
                 == vk::PipelineStageFlagBits2::eAllGraphics
             && fragmentAsRead.stageFlags
                 == vk::PipelineStageFlagBits2::eFragmentShader;
+
+        const nvrhi::ShaderType meshPipelineStages =
+            nvrhi::ShaderType::Amplification
+            | nvrhi::ShaderType::Mesh
+            | nvrhi::ShaderType::Pixel;
+        mappingPassed &= nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::Pixel,
+                nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
+                == nvrhi::ShaderType::Pixel
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::All, nvrhi::ShaderType::Compute)
+                == nvrhi::ShaderType::Compute
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::AllGraphics, meshPipelineStages)
+                == meshPipelineStages
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::All,
+                nvrhi::ShaderType::AllRayTracing)
+                == nvrhi::ShaderType::AllRayTracing
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::Compute, nvrhi::ShaderType::All)
+                == nvrhi::ShaderType::Compute
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::Pixel, nvrhi::ShaderType::Compute)
+                == nvrhi::ShaderType::All
+            && nvrhi::vulkan::resolveBindingBarrierShaderStages(
+                nvrhi::ShaderType::None, nvrhi::ShaderType::Compute)
+                == nvrhi::ShaderType::All;
 
         nvrhi::TextureDesc sampledDepthDesc {};
         sampledDepthDesc.format = nvrhi::Format::D32;
@@ -617,6 +646,44 @@ int main()
                 && barriers[0].shaderStagesAfter
                     == stageUnion(nvrhi::ShaderType::Compute,
                         nvrhi::ShaderType::Pixel);
+        }
+
+        // A repeated UAV declaration before barrier submission must widen the
+        // pending transition, not append a second dependency to the same batch.
+        // The widened stage set also remains the source of the next transition.
+        {
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            tracker.requireBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Compute);
+            tracker.requireBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Pixel);
+            const nvrhi::ShaderType uavStages =
+                stageUnion(nvrhi::ShaderType::Compute,
+                    nvrhi::ShaderType::Pixel);
+            const auto& pendingBarriers = tracker.getBufferBarriers();
+            trackerPassed &= pendingBarriers.size() == 1
+                && pendingBarriers[0].stateBefore == nvrhi::ResourceStates::CopyDest
+                && pendingBarriers[0].stateAfter == nvrhi::ResourceStates::UnorderedAccess
+                && pendingBarriers[0].shaderStagesAfter == uavStages;
+
+            tracker.clearBarriers();
+            tracker.requireBufferState(
+                &trackerBuffer,
+                nvrhi::ResourceStates::CopySource,
+                nvrhi::ShaderType::None);
+            const auto& laterBarriers = tracker.getBufferBarriers();
+            trackerPassed &= laterBarriers.size() == 1
+                && laterBarriers[0].stateBefore == nvrhi::ResourceStates::UnorderedAccess
+                && laterBarriers[0].stateAfter == nvrhi::ResourceStates::CopySource
+                && laterBarriers[0].shaderStagesBefore == uavStages;
         }
 
         // Repeated UAV access remains a RAW/WAW dependency with exact stages.
@@ -776,6 +843,110 @@ int main()
                 && barriers[0].shaderStagesAfter
                     == stageUnion(nvrhi::ShaderType::Compute,
                         nvrhi::ShaderType::Pixel);
+        }
+
+        // Pending whole-texture UAV transitions coalesce in the same way as
+        // buffers, retaining the stage union for the following dependency.
+        {
+            nvrhi::TextureDesc trackerTextureDesc {};
+            trackerTextureDesc.width = 4;
+            trackerTextureDesc.height = 4;
+            trackerTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            trackerTextureDesc.isUAV = true;
+            trackerTextureDesc.debugName = "PendingWholeUavTrackerTexture";
+            nvrhi::TextureStateExtension trackerTexture(trackerTextureDesc);
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingTextureState(
+                &trackerTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            tracker.requireTextureState(
+                &trackerTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Compute);
+            tracker.requireTextureState(
+                &trackerTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Pixel);
+            const nvrhi::ShaderType uavStages =
+                stageUnion(nvrhi::ShaderType::Compute,
+                    nvrhi::ShaderType::Pixel);
+            const auto& pendingBarriers = tracker.getTextureBarriers();
+            trackerPassed &= pendingBarriers.size() == 1
+                && pendingBarriers[0].entireTexture
+                && pendingBarriers[0].stateBefore == nvrhi::ResourceStates::CopyDest
+                && pendingBarriers[0].stateAfter == nvrhi::ResourceStates::UnorderedAccess
+                && pendingBarriers[0].shaderStagesAfter == uavStages;
+
+            tracker.clearBarriers();
+            tracker.requireTextureState(
+                &trackerTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::CopySource,
+                nvrhi::ShaderType::None);
+            const auto& laterBarriers = tracker.getTextureBarriers();
+            trackerPassed &= laterBarriers.size() == 1
+                && laterBarriers[0].entireTexture
+                && laterBarriers[0].stateBefore == nvrhi::ResourceStates::UnorderedAccess
+                && laterBarriers[0].stateAfter == nvrhi::ResourceStates::CopySource
+                && laterBarriers[0].shaderStagesBefore == uavStages;
+        }
+
+        // Partial texture tracking uses a separate subresource path, including
+        // its own UAV-barrier suppression state. It must preserve the same union.
+        {
+            nvrhi::TextureDesc trackerTextureDesc {};
+            trackerTextureDesc.width = 4;
+            trackerTextureDesc.height = 4;
+            trackerTextureDesc.mipLevels = 2;
+            trackerTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            trackerTextureDesc.isUAV = true;
+            trackerTextureDesc.debugName = "PendingPartialUavTrackerTexture";
+            nvrhi::TextureStateExtension trackerTexture(trackerTextureDesc);
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            tracker.beginTrackingTextureState(
+                &trackerTexture,
+                nvrhi::AllSubresources,
+                nvrhi::ResourceStates::CopyDest,
+                nvrhi::ShaderType::None);
+            tracker.requireTextureState(
+                &trackerTexture,
+                mip0,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Compute);
+            tracker.requireTextureState(
+                &trackerTexture,
+                mip0,
+                nvrhi::ResourceStates::UnorderedAccess,
+                nvrhi::ShaderType::Pixel);
+            const nvrhi::ShaderType uavStages =
+                stageUnion(nvrhi::ShaderType::Compute,
+                    nvrhi::ShaderType::Pixel);
+            const auto& pendingBarriers = tracker.getTextureBarriers();
+            trackerPassed &= pendingBarriers.size() == 1
+                && !pendingBarriers[0].entireTexture
+                && pendingBarriers[0].mipLevel == 0
+                && pendingBarriers[0].stateBefore == nvrhi::ResourceStates::CopyDest
+                && pendingBarriers[0].stateAfter == nvrhi::ResourceStates::UnorderedAccess
+                && pendingBarriers[0].shaderStagesAfter == uavStages;
+
+            tracker.clearBarriers();
+            tracker.requireTextureState(
+                &trackerTexture,
+                mip0,
+                nvrhi::ResourceStates::CopySource,
+                nvrhi::ShaderType::None);
+            const auto& laterBarriers = tracker.getTextureBarriers();
+            trackerPassed &= laterBarriers.size() == 1
+                && !laterBarriers[0].entireTexture
+                && laterBarriers[0].mipLevel == 0
+                && laterBarriers[0].stateBefore == nvrhi::ResourceStates::UnorderedAccess
+                && laterBarriers[0].stateAfter == nvrhi::ResourceStates::CopySource
+                && laterBarriers[0].shaderStagesBefore == uavStages;
         }
 
         passed &= trackerPassed;

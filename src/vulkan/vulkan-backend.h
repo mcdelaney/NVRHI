@@ -76,6 +76,8 @@ namespace nvrhi::vulkan
 
     vk::SamplerAddressMode convertSamplerAddressMode(SamplerAddressMode mode);
     vk::PipelineStageFlags2 convertShaderTypeToPipelineStageFlags(ShaderType shaderType);
+    ShaderType resolveBindingBarrierShaderStages(
+        ShaderType layoutVisibility, ShaderType pipelineStages);
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType);
     ResourceStateMapping convertResourceState(ResourceStates state, bool isImage,
         bool useGeneralLayout = false, bool isDepthStencil = false,
@@ -1511,8 +1513,15 @@ namespace nvrhi::vulkan
         void insertComputeResourceBarriers(const ComputeState& state);
         void insertMeshletResourceBarriers(const MeshletState& state);
         void insertRayTracingResourceBarriers(const rt::State& state);
-        void insertResourceBarriersForBindingSets(const BindingSetVector& newBindings, const BindingSetVector& oldBindings);
-        void setResourceStatesForBindingSetInternal(IBindingSet* bindingSet, bool automaticOnly);
+        void insertResourceBarriersForBindingSets(
+            const BindingSetVector& newBindings,
+            const BindingSetVector& oldBindings,
+            ShaderType pipelineStages,
+            ShaderType previousPipelineStages);
+        void setResourceStatesForBindingSetInternal(
+            IBindingSet* bindingSet,
+            bool automaticOnly,
+            ShaderType pipelineStages);
         
         void writeVolatileBuffer(Buffer* buffer, const void* data, size_t dataSize);
         void flushVolatileBufferWrites();
@@ -1523,8 +1532,10 @@ namespace nvrhi::vulkan
         void updateMeshletVolatileBuffers();
         void updateRayTracingVolatileBuffers();
 
-        void requireTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates state);
-        void requireBufferState(IBuffer* buffer, ResourceStates state);
+        void requireTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates state, ShaderType shaderStages = ShaderType::All);
+        void requireBufferState(IBuffer* buffer, ResourceStates state,
+            ShaderType shaderStages = ShaderType::All);
         bool anyBarriers() const;
 
         void buildTopLevelAccelStructInternal(AccelStruct* as, VkDeviceAddress instanceData, size_t numInstances, rt::AccelStructBuildFlags buildFlags, uint64_t currentVersion);
