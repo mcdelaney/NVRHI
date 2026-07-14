@@ -1387,6 +1387,13 @@ namespace nvrhi::vulkan
         bool ensureBufferStateTracked(
             ICommandList* commandList, IBuffer* buffer,
             const GraphResourceState& exactState) override;
+        bool verifyTextureStateTracked(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceState& exactState) override;
+        bool verifyBufferStateTracked(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceState& exactState) override;
         bool transitionTextureState(
             ICommandList* commandList, ITexture* texture,
             TextureSubresourceSet subresources,
@@ -1451,6 +1458,11 @@ namespace nvrhi::vulkan
             Texture* texture, TextureSubresourceSet subresources,
             const GraphResourceState& exactState);
         bool ensureBufferStateTracked(
+            Buffer* buffer, const GraphResourceState& exactState);
+        bool verifyTextureStateTracked(
+            Texture* texture, TextureSubresourceSet subresources,
+            const GraphResourceState& exactState);
+        bool verifyBufferStateTracked(
             Buffer* buffer, const GraphResourceState& exactState);
         bool recordTextureStateTransition(
             Texture* texture, TextureSubresourceSet subresources,

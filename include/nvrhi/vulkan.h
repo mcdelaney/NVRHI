@@ -276,6 +276,21 @@ namespace nvrhi::vulkan
             ICommandList* commandList, IBuffer* buffer,
             const GraphResourceState& exactState) = 0;
 
+        // Fail-closed, verify-only graph tracker queries. These apply the
+        // same ownership, command-list, resource, range, stage-scope, and
+        // lifetime eligibility rules as the ensure methods, but every
+        // addressed state must already be known and must match exactState's
+        // logical state and shader-stage scope exactly. They never seed or
+        // otherwise mutate tracked state. Successful verification retains the
+        // resource for the command buffer's lifetime.
+        virtual bool verifyTextureStateTracked(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceState& exactState) = 0;
+        virtual bool verifyBufferStateTracked(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceState& exactState) = 0;
+
         // Fail-closed graph-authored logical transitions. Every addressed
         // subresource must already be tracked in transition.stateBefore and
         // transition.shaderStagesBefore exactly.

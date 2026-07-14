@@ -808,7 +808,7 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 30
+            mappingPassed &= nvrhi::c_HeaderVersion == 31
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
@@ -2800,6 +2800,180 @@ int main()
                 vkDevice,
                 device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
                 graphSubmitId);
+        }
+    }
+
+    // Verify-only graph tracking rejects unknown or inexact state without
+    // seeding it, accepts exact ensured state, rejects mixed texture ranges,
+    // and independently retains successfully verified resources.
+    {
+        const uint32_t errorsBeforeGraphVerification = messageCallback.errors;
+
+        nvrhi::BufferDesc verifyBufferDesc {};
+        verifyBufferDesc.byteSize = 64;
+        verifyBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        verifyBufferDesc.keepInitialState = false;
+        verifyBufferDesc.debugName = "VerifyOnlyUnknownBuffer";
+        nvrhi::BufferHandle verifyBuffer =
+            device->createBuffer(verifyBufferDesc);
+        verifyBufferDesc.debugName = "VerifyOnlyStageBuffer";
+        nvrhi::BufferHandle verifyStageBuffer =
+            device->createBuffer(verifyBufferDesc);
+
+        nvrhi::TextureDesc verifyTextureDesc {};
+        verifyTextureDesc.width = 4;
+        verifyTextureDesc.height = 4;
+        verifyTextureDesc.mipLevels = 2;
+        verifyTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        verifyTextureDesc.initialState = nvrhi::ResourceStates::Common;
+        verifyTextureDesc.keepInitialState = false;
+        verifyTextureDesc.debugName = "VerifyOnlyRangeTexture";
+        nvrhi::TextureHandle verifyTexture =
+            device->createTexture(verifyTextureDesc);
+        verifyTextureDesc.mipLevels = 1;
+        verifyTextureDesc.debugName = "VerifyOnlyStageTexture";
+        nvrhi::TextureHandle verifyStageTexture =
+            device->createTexture(verifyTextureDesc);
+
+        nvrhi::CommandListHandle verifyList = device->createCommandList(
+            nvrhi::CommandListParameters().setQueueType(
+                nvrhi::CommandQueue::Graphics));
+        passed &= verifyBuffer && verifyStageBuffer
+            && verifyTexture && verifyStageTexture && verifyList;
+        if (verifyBuffer && verifyStageBuffer
+            && verifyTexture && verifyStageTexture && verifyList)
+        {
+            nvrhi::vulkan::GraphResourceState common {};
+            common.setState(nvrhi::ResourceStates::Common)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceState copyDest {};
+            copyDest.setState(nvrhi::ResourceStates::CopyDest)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceState shaderPixel {};
+            shaderPixel.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::Pixel);
+            nvrhi::vulkan::GraphResourceState shaderCompute {};
+            shaderCompute.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::Compute);
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            const nvrhi::TextureSubresourceSet mip1(1, 1, 0, 1);
+
+            verifyList->open();
+
+            // Unknown rejection must not seed the requested state: ensuring a
+            // different state immediately afterward must still succeed.
+            passed &= !device->verifyBufferStateTracked(
+                verifyList, verifyBuffer, common);
+            passed &= device->ensureBufferStateTracked(
+                verifyList, verifyBuffer, copyDest);
+            passed &= device->verifyBufferStateTracked(
+                verifyList, verifyBuffer, copyDest);
+            passed &= !device->verifyBufferStateTracked(
+                verifyList, verifyBuffer, common);
+
+            passed &= device->ensureBufferStateTracked(
+                verifyList, verifyStageBuffer, shaderPixel);
+            passed &= device->verifyBufferStateTracked(
+                verifyList, verifyStageBuffer, shaderPixel);
+            passed &= !device->verifyBufferStateTracked(
+                verifyList, verifyStageBuffer, shaderCompute);
+
+            passed &= !device->verifyTextureStateTracked(
+                verifyList, verifyTexture, mip0, common);
+            passed &= device->ensureTextureStateTracked(
+                verifyList, verifyTexture, mip0, copyDest);
+            passed &= device->verifyTextureStateTracked(
+                verifyList, verifyTexture, mip0, copyDest);
+            passed &= !device->verifyTextureStateTracked(
+                verifyList, verifyTexture, mip0, common);
+
+            // Mip 0 is known while mip 1 is unknown. Whole-resource verify
+            // fails and must leave mip 1 unknown so a different ensure works.
+            passed &= !device->verifyTextureStateTracked(
+                verifyList, verifyTexture,
+                nvrhi::AllSubresources, copyDest);
+            passed &= device->ensureTextureStateTracked(
+                verifyList, verifyTexture, mip1, common);
+            passed &= device->verifyTextureStateTracked(
+                verifyList, verifyTexture, mip1, common);
+
+            passed &= device->ensureTextureStateTracked(
+                verifyList, verifyStageTexture,
+                nvrhi::AllSubresources, shaderPixel);
+            passed &= device->verifyTextureStateTracked(
+                verifyList, verifyStageTexture,
+                nvrhi::AllSubresources, shaderPixel);
+            passed &= !device->verifyTextureStateTracked(
+                verifyList, verifyStageTexture,
+                nvrhi::AllSubresources, shaderCompute);
+
+            // Remove references established by ensure, then prove successful
+            // verification independently restores command-buffer lifetime.
+            auto* vulkanVerifyList =
+                dynamic_cast<nvrhi::vulkan::CommandList*>(verifyList.Get());
+            passed &= vulkanVerifyList != nullptr;
+            if (vulkanVerifyList)
+            {
+                const auto commandBuffer = vulkanVerifyList->getCurrentCmdBuf();
+                passed &= commandBuffer != nullptr;
+                if (commandBuffer)
+                {
+                    commandBuffer->referencedResources.clear();
+                    passed &= device->verifyBufferStateTracked(
+                        verifyList, verifyBuffer, copyDest);
+                    passed &= device->verifyBufferStateTracked(
+                        verifyList, verifyStageBuffer, shaderPixel);
+                    passed &= device->verifyTextureStateTracked(
+                        verifyList, verifyTexture, mip0, copyDest);
+                    passed &= device->verifyTextureStateTracked(
+                        verifyList, verifyTexture, mip1, common);
+                    passed &= device->verifyTextureStateTracked(
+                        verifyList, verifyStageTexture,
+                        nvrhi::AllSubresources, shaderPixel);
+
+                    const auto hasReference =
+                        [&](nvrhi::IResource* resource) {
+                            return std::any_of(
+                                commandBuffer->referencedResources.begin(),
+                                commandBuffer->referencedResources.end(),
+                                [resource](const nvrhi::RefCountPtr<nvrhi::IResource>& item) {
+                                    return item.Get() == resource;
+                                });
+                        };
+                    passed &= hasReference(verifyBuffer.Get());
+                    passed &= hasReference(verifyStageBuffer.Get());
+                    passed &= hasReference(verifyTexture.Get());
+                    passed &= hasReference(verifyStageTexture.Get());
+                }
+            }
+
+            passed &= messageCallback.errors
+                == errorsBeforeGraphVerification + 7;
+            messageCallback.errors = errorsBeforeGraphVerification;
+
+            verifyBuffer = nullptr;
+            verifyStageBuffer = nullptr;
+            verifyTexture = nullptr;
+            verifyStageTexture = nullptr;
+            verifyList->close();
+
+            nvrhi::ICommandList* verifyListPtr = verifyList.Get();
+            const uint64_t verifySubmitId =
+                device->executeCommandListsWithSyncIsolated(
+                    &verifyListPtr,
+                    1,
+                    nvrhi::CommandQueue::Graphics,
+                    emptyExtras);
+            passed &= verifySubmitId > previousId;
+            previousId = verifySubmitId;
+            passed &= waitTimeline(
+                vkDevice,
+                device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
+                verifySubmitId);
+        }
+        else
+        {
+            messageCallback.errors = errorsBeforeGraphVerification;
         }
     }
 

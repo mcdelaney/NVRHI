@@ -1660,6 +1660,181 @@ namespace nvrhi::vulkan
         return true;
     }
 
+    bool CommandList::verifyTextureStateTracked(
+        Texture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceState& exactState)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph texture state must be verified on an open command list");
+            return false;
+        }
+        if (!texture || !texture->belongsTo(m_Context))
+        {
+            m_Context.error("Graph texture verification texture belongs to a different device");
+            return false;
+        }
+        if (!texture->managed)
+        {
+            m_Context.error("Graph texture verification requires a Vulkan-managed texture");
+            return false;
+        }
+        if (texture->desc.keepInitialState)
+        {
+            m_Context.error("Graph texture verification textures must disable keepInitialState");
+            return false;
+        }
+        if (texture->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentTextureState(texture))
+        {
+            m_Context.error("Graph texture verification cannot target a permanent-state texture");
+            return false;
+        }
+        if (!validateGraphState(
+                m_Context, exactState, true, &texture->desc,
+                "Graph texture verification"))
+        {
+            return false;
+        }
+
+        if (!isValidGraphTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture verification range is empty or out of bounds");
+            return false;
+        }
+        subresources = subresources.resolve(texture->desc, false);
+        if (!isValidResolvedTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture verification range is empty or out of bounds");
+            return false;
+        }
+        if (isTextureRangeReleased(texture, subresources))
+        {
+            reportReleasedResourceUse("texture", texture->desc.debugName);
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping mapping = convertTextureState(
+            exactState.state, texture->desc, exactState.shaderStages);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                mapping.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph texture verification stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                const ResourceStates tracked =
+                    m_StateTracker.getTextureSubresourceState(
+                        texture, arraySlice, mipLevel);
+                if (tracked == ResourceStates::Unknown)
+                {
+                    m_Context.error("Graph texture verification requires every addressed subresource state to be known");
+                    return false;
+                }
+                if (tracked != exactState.state
+                    || m_StateTracker.getTextureSubresourceShaderStages(
+                        texture, arraySlice, mipLevel)
+                        != exactState.shaderStages)
+                {
+                    m_Context.error("Graph texture verification does not match every exact tracked subresource state and stage scope");
+                    return false;
+                }
+            }
+        }
+
+        m_CurrentCmdBuf->referencedResources.push_back(texture);
+        return true;
+    }
+
+    bool CommandList::verifyBufferStateTracked(
+        Buffer* buffer,
+        const GraphResourceState& exactState)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph buffer state must be verified on an open command list");
+            return false;
+        }
+        if (!buffer || !buffer->belongsTo(m_Context))
+        {
+            m_Context.error("Graph buffer verification buffer belongs to a different device");
+            return false;
+        }
+        if (!buffer->managed)
+        {
+            m_Context.error("Graph buffer verification requires a Vulkan-managed buffer");
+            return false;
+        }
+        if (buffer->desc.keepInitialState)
+        {
+            m_Context.error("Graph buffer verification buffers must disable keepInitialState");
+            return false;
+        }
+        if (buffer->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentBufferState(buffer))
+        {
+            m_Context.error("Graph buffer verification cannot target a permanent-state buffer");
+            return false;
+        }
+        if (buffer->desc.isVolatile
+            || buffer->desc.cpuAccess != CpuAccessMode::None)
+        {
+            m_Context.error("Graph buffer verification does not support volatile or CPU-visible buffers");
+            return false;
+        }
+        if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
+        {
+            reportReleasedResourceUse("buffer", buffer->desc.debugName);
+            return false;
+        }
+        if (!validateGraphState(
+                m_Context, exactState, false, nullptr,
+                "Graph buffer verification"))
+        {
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping mapping = convertResourceState(
+            exactState.state, false, false, false,
+            exactState.shaderStages);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                mapping.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph buffer verification stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        const ResourceStates tracked = m_StateTracker.getBufferState(buffer);
+        if (tracked == ResourceStates::Unknown)
+        {
+            m_Context.error("Graph buffer verification requires the tracked state to be known");
+            return false;
+        }
+        if (tracked != exactState.state
+            || m_StateTracker.getBufferShaderStages(buffer)
+                != exactState.shaderStages)
+        {
+            m_Context.error("Graph buffer verification does not match the exact tracked state and stage scope");
+            return false;
+        }
+
+        m_CurrentCmdBuf->referencedResources.push_back(buffer);
+        return true;
+    }
+
     bool CommandList::recordTextureStateTransition(
         Texture* texture,
         TextureSubresourceSet subresources,
@@ -2006,6 +2181,49 @@ namespace nvrhi::vulkan
             return false;
         }
         return vulkanCommandList->ensureBufferStateTracked(
+            vulkanBuffer, exactState);
+    }
+
+    bool Device::verifyTextureStateTracked(
+        ICommandList* commandList,
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceState& exactState)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Texture* vulkanTexture = dynamic_cast<Texture*>(texture);
+        if (!vulkanCommandList || !vulkanTexture)
+        {
+            m_Context.error("Graph texture verification requires Vulkan command-list and texture objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph texture verification command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->verifyTextureStateTracked(
+            vulkanTexture, subresources, exactState);
+    }
+
+    bool Device::verifyBufferStateTracked(
+        ICommandList* commandList,
+        IBuffer* buffer,
+        const GraphResourceState& exactState)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Buffer* vulkanBuffer = dynamic_cast<Buffer*>(buffer);
+        if (!vulkanCommandList || !vulkanBuffer)
+        {
+            m_Context.error("Graph buffer verification requires Vulkan command-list and buffer objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph buffer verification command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->verifyBufferStateTracked(
             vulkanBuffer, exactState);
     }
 
