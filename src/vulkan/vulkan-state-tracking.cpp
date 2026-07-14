@@ -52,7 +52,7 @@ namespace nvrhi::vulkan
             switch(binding.type)  // NOLINT(clang-diagnostic-switch-enum)
             {
                 case ResourceType::Texture_SRV:
-                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, ResourceStates::ShaderResource);
+                    requireTextureState(checked_cast<ITexture*>(binding.resourceHandle), binding.subresources, getTextureSrvState(binding));
                     break;
 
                 case ResourceType::Texture_UAV:
@@ -95,19 +95,17 @@ namespace nvrhi::vulkan
         if (bindingUpdateMask == 0)
             bindingUpdateMask = arrayDifferenceMask(newBindings, oldBindings);
 
-        if (bindingUpdateMask != 0)
+        for (size_t i = 0; i < newBindings.size(); i++)
         {
-            for (size_t i = 0; i < newBindings.size(); i++)
-            {
-                if (newBindings[i]->getDesc() == nullptr) // Ignore bindless sets
-                    continue;
+            if (newBindings[i]->getDesc() == nullptr) // Ignore bindless sets
+                continue;
 
-                BindingSet const* bindingSet = checked_cast<BindingSet const*>(newBindings[i]);
+            BindingSet const* bindingSet = checked_cast<BindingSet const*>(newBindings[i]);
 
-                bool const updateThisSet = (bindingUpdateMask & (1u << i)) != 0;
-                if (updateThisSet || bindingSet->hasUavBindings) // UAV bindings may place UAV barriers on the same binding set
-                    setResourceStatesForBindingSetInternal(newBindings[i], true);
-            }
+            bool const updateThisSet = (bindingUpdateMask & (1u << i)) != 0;
+            bool const refreshUavBarriers = bindingUpdateMask != 0 && bindingSet->hasUavBindings;
+            if (updateThisSet || refreshUavBarriers || bindingSet->hasDepthReadOnlyAttachmentBindings)
+                setResourceStatesForBindingSetInternal(newBindings[i], true);
         }
     }
 
@@ -225,10 +223,10 @@ namespace nvrhi::vulkan
         {
             Texture* texture = static_cast<Texture*>(barrier.texture);
 
-            ResourceStateMapping before = convertResourceState(
-                barrier.stateBefore, true, texture->desc.useGeneralLayout);
-            ResourceStateMapping after = convertResourceState(
-                barrier.stateAfter, true, texture->desc.useGeneralLayout);
+            ResourceStateMapping before = convertTextureState(
+                barrier.stateBefore, texture->desc);
+            ResourceStateMapping after = convertTextureState(
+                barrier.stateAfter, texture->desc);
 
             assert(after.imageLayout != vk::ImageLayout::eUndefined);
 

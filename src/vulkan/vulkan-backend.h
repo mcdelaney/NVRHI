@@ -77,8 +77,16 @@ namespace nvrhi::vulkan
     vk::SamplerAddressMode convertSamplerAddressMode(SamplerAddressMode mode);
     vk::PipelineStageFlagBits2 convertShaderTypeToPipelineStageFlagBits(ShaderType shaderType);
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType);
-    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage, bool useGeneralLayout = false);
+    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage,
+        bool useGeneralLayout = false, bool isDepthStencil = false);
+    ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc);
     vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc);
+    inline ResourceStates getTextureSrvState(const BindingSetItem& binding)
+    {
+        return binding.depthReadOnlyAttachment
+            ? ResourceStates::ShaderResource | ResourceStates::DepthRead
+            : ResourceStates::ShaderResource;
+    }
     vk::PrimitiveTopology convertPrimitiveTopology(PrimitiveType topology);
     vk::PolygonMode convertFillMode(RasterFillMode mode);
     vk::CullModeFlagBits convertCullMode(RasterCullMode mode);
@@ -870,6 +878,7 @@ namespace nvrhi::vulkan
 
         std::vector<uint16_t> bindingsThatNeedTransitions;
         bool hasUavBindings = false;
+        bool hasDepthReadOnlyAttachmentBindings = false;
 
         explicit BindingSet(const VulkanContext& context)
             : m_Context(context)

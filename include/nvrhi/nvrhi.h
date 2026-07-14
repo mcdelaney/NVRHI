@@ -2157,7 +2157,13 @@ namespace nvrhi
         // item is bound. Explicit ICommandList::setResourceStatesForBindingSet calls
         // still transition it. Ignored by other backends.
         uint8_t enableAutomaticTransitions : 1;
-        uint8_t unused                     : 7;
+        // Vulkan only: marks a depth Texture_SRV that is sampled while the same
+        // subresources are bound as a read-only depth/stencil attachment. Such a
+        // binding uses ShaderResource | DepthRead and
+        // DEPTH_STENCIL_READ_ONLY_OPTIMAL instead of SHADER_READ_ONLY_OPTIMAL.
+        // Descriptor-table callers must establish the combined state explicitly.
+        uint8_t depthReadOnlyAttachment    : 1;
+        uint8_t unused                     : 6;
 
         uint32_t unused2; // padding
 
@@ -2181,6 +2187,7 @@ namespace nvrhi
                 && dimension == b.dimension
                 && format == b.format
                 && enableAutomaticTransitions == b.enableAutomaticTransitions
+                && depthReadOnlyAttachment == b.depthReadOnlyAttachment
                 && rawData[0] == b.rawData[0]
                 && rawData[1] == b.rawData[1];
         }
@@ -2208,6 +2215,7 @@ namespace nvrhi
             result.rawData[0] = 0;
             result.rawData[1] = 0;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2225,6 +2233,7 @@ namespace nvrhi
             result.dimension = dimension;
             result.subresources = subresources;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2243,6 +2252,7 @@ namespace nvrhi
             result.dimension = dimension;
             result.subresources = subresources;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2259,6 +2269,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2275,6 +2286,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2293,6 +2305,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2310,6 +2323,7 @@ namespace nvrhi
             result.rawData[0] = 0;
             result.rawData[1] = 0;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2327,6 +2341,7 @@ namespace nvrhi
             result.rawData[0] = 0;
             result.rawData[1] = 0;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2343,6 +2358,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2359,6 +2375,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2375,6 +2392,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2391,6 +2409,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.range = range;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2408,6 +2427,7 @@ namespace nvrhi
             result.range.byteOffset = 0;
             result.range.byteSize = byteSize;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2424,6 +2444,7 @@ namespace nvrhi
             result.dimension = TextureDimension::Unknown;
             result.subresources = AllSubresources;
             result.enableAutomaticTransitions = true;
+            result.depthReadOnlyAttachment = false;
             result.unused = 0;
             result.unused2 = 0;
             return result;
@@ -2435,6 +2456,7 @@ namespace nvrhi
         BindingSetItem& setSubresources(TextureSubresourceSet value) { subresources = value; return *this; }
         BindingSetItem& setRange(BufferRange value) { range = value; return *this; }
         BindingSetItem& setEnableAutomaticTransitions(bool value) { enableAutomaticTransitions = value; return *this; }
+        BindingSetItem& setDepthReadOnlyAttachment(bool value) { depthReadOnlyAttachment = value; return *this; }
     };
 
     // verify the packing of BindingSetItem for good alignment
@@ -3919,6 +3941,7 @@ namespace std
             nvrhi::hash_combine(value, s.dimension);
             nvrhi::hash_combine(value, s.format);
             nvrhi::hash_combine(value, s.enableAutomaticTransitions);
+            nvrhi::hash_combine(value, s.depthReadOnlyAttachment);
             nvrhi::hash_combine(value, s.rawData[0]);
             nvrhi::hash_combine(value, s.rawData[1]);
             return value;

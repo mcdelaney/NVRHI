@@ -317,9 +317,14 @@ namespace nvrhi::vulkan
             vk::ImageLayout::eUndefined },
     };
 
-    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage, bool useGeneralLayout)
+    ResourceStateMapping convertResourceState(ResourceStates state, bool isImage,
+        bool useGeneralLayout, bool isDepthStencil)
     {
         ResourceStateMapping result = {};
+        const ResourceStates shaderDepthRead =
+            ResourceStates::ShaderResource | ResourceStates::DepthRead;
+        const bool useDepthReadOnlyLayout = isImage && isDepthStencil
+            && (state & shaderDepthRead) == shaderDepthRead;
 
         constexpr uint32_t numStateBits = sizeof(g_ResourceStateMap) / sizeof(g_ResourceStateMap[0]);
 
@@ -336,6 +341,13 @@ namespace nvrhi::vulkan
 
                 assert(uint32_t(mapping.nvrhiState) == bit);
                 vk::ImageLayout imageLayout = mapping.imageLayout;
+                if (useDepthReadOnlyLayout
+                    && mapping.nvrhiState == ResourceStates::ShaderResource)
+                {
+                    // Preserve ShaderResource's stage/access contribution while
+                    // using the layout shared with a read-only depth attachment.
+                    imageLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+                }
                 if (isImage && useGeneralLayout
                     && imageLayout != vk::ImageLayout::eUndefined
                     && imageLayout != vk::ImageLayout::ePresentSrcKHR)
@@ -372,9 +384,16 @@ namespace nvrhi::vulkan
         return result;
     }
 
+    ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc)
+    {
+        const FormatInfo& formatInfo = getFormatInfo(desc.format);
+        return convertResourceState(state, true, desc.useGeneralLayout,
+            formatInfo.hasDepth || formatInfo.hasStencil);
+    }
+
     vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc)
     {
-        return convertResourceState(state, true, desc.useGeneralLayout).imageLayout;
+        return convertTextureState(state, desc).imageLayout;
     }
 
     const char* resultToString(VkResult result)

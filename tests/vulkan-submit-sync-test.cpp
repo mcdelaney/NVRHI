@@ -516,17 +516,23 @@ int main()
         optedOutItem.setEnableAutomaticTransitions(false);
         nvrhi::BindingSetItem arrayItem = defaultItem;
         arrayItem.setArrayElement(1);
+        nvrhi::BindingSetItem depthReadOnlyItem = defaultItem;
+        depthReadOnlyItem.setDepthReadOnlyAttachment(true);
 
         const std::hash<nvrhi::BindingSetItem> itemHash {};
         const bool itemIdentityPassed = defaultItem.enableAutomaticTransitions
+            && !defaultItem.depthReadOnlyAttachment
             && !optedOutItem.enableAutomaticTransitions
+            && depthReadOnlyItem.depthReadOnlyAttachment
             && defaultItem != optedOutItem
             && itemHash(defaultItem) != itemHash(optedOutItem)
             && defaultItem != arrayItem
-            && itemHash(defaultItem) != itemHash(arrayItem);
+            && itemHash(defaultItem) != itemHash(arrayItem)
+            && defaultItem != depthReadOnlyItem
+            && itemHash(defaultItem) != itemHash(depthReadOnlyItem);
         passed &= itemIdentityPassed;
         if (!itemIdentityPassed)
-            std::cerr << "BindingSetItem transition/array identity test failed\n";
+            std::cerr << "BindingSetItem transition/array/depth identity test failed\n";
     }
 
     // Opting a UAV out of implicit transitions also opts it out of the
@@ -582,7 +588,7 @@ int main()
             std::cerr << "BindingSetItem implicit UAV-transition policy test failed\n";
     }
 
-    // The opt-in policy changes only the Vulkan image layout. State-derived
+    // TextureDesc::useGeneralLayout changes only the Vulkan image layout. State-derived
     // stage and access masks are still supplied by convertResourceState and
     // are covered by the validation-backed transfer test below.
     nvrhi::TextureDesc defaultLayoutDesc {};
@@ -635,6 +641,182 @@ int main()
     passed &= nvrhi::vulkan::convertTextureLayout(
         nvrhi::ResourceStates::ShaderResource | nvrhi::ResourceStates::UnorderedAccess,
         generalLayoutDesc) == vk::ImageLayout::eGeneral;
+
+    // A sampled read-only depth attachment keeps both usages in its access and
+    // stage masks while using the one Vulkan layout compatible with both.
+    const nvrhi::ResourceStates sampledDepthState =
+        nvrhi::ResourceStates::ShaderResource | nvrhi::ResourceStates::DepthRead;
+    nvrhi::TextureDesc depthLayoutDesc {};
+    depthLayoutDesc.format = nvrhi::Format::D32;
+    nvrhi::TextureDesc generalDepthLayoutDesc = depthLayoutDesc;
+    generalDepthLayoutDesc.useGeneralLayout = true;
+    const nvrhi::vulkan::ResourceStateMapping sampledDepthMapping =
+        nvrhi::vulkan::convertTextureState(sampledDepthState, depthLayoutDesc);
+    const nvrhi::vulkan::ResourceStateMapping generalSampledDepthMapping =
+        nvrhi::vulkan::convertTextureState(sampledDepthState, generalDepthLayoutDesc);
+    const vk::AccessFlags2 sampledDepthAccess =
+        vk::AccessFlagBits2::eShaderRead
+        | vk::AccessFlagBits2::eDepthStencilAttachmentRead;
+    const vk::PipelineStageFlags2 sampledDepthStages =
+        vk::PipelineStageFlagBits2::eAllCommands
+        | vk::PipelineStageFlagBits2::eEarlyFragmentTests
+        | vk::PipelineStageFlagBits2::eLateFragmentTests;
+    const bool sampledDepthMappingPassed =
+        sampledDepthMapping.nvrhiState == sampledDepthState
+        && sampledDepthMapping.imageLayout == vk::ImageLayout::eDepthStencilReadOnlyOptimal
+        && (sampledDepthMapping.accessMask & sampledDepthAccess) == sampledDepthAccess
+        && (sampledDepthMapping.stageFlags & sampledDepthStages) == sampledDepthStages
+        && generalSampledDepthMapping.nvrhiState == sampledDepthState
+        && generalSampledDepthMapping.imageLayout == vk::ImageLayout::eGeneral
+        && generalSampledDepthMapping.accessMask == sampledDepthMapping.accessMask
+        && generalSampledDepthMapping.stageFlags == sampledDepthMapping.stageFlags;
+    passed &= sampledDepthMappingPassed;
+    if (!sampledDepthMappingPassed)
+        std::cerr << "Sampled read-only depth state mapping test failed\n";
+
+    // Exercise the actual binding-set -> read-only framebuffer ordering used by
+    // CardEffects. The framebuffer's DepthRead request is a subset and must not
+    // narrow the combined ShaderResource | DepthRead state, for either whole-
+    // resource or expanded subresource tracking.
+    {
+        struct DepthFormatCandidate
+        {
+            VkFormat vkFormat;
+            nvrhi::Format nvrhiFormat;
+        };
+        constexpr std::array<DepthFormatCandidate, 4> depthFormatCandidates {{
+            { VK_FORMAT_D32_SFLOAT, nvrhi::Format::D32 },
+            { VK_FORMAT_D24_UNORM_S8_UINT, nvrhi::Format::D24S8 },
+            { VK_FORMAT_D16_UNORM, nvrhi::Format::D16 },
+            { VK_FORMAT_D32_SFLOAT_S8_UINT, nvrhi::Format::D32S8 },
+        }};
+
+        nvrhi::Format depthFormat = nvrhi::Format::UNKNOWN;
+        for (const DepthFormatCandidate& candidate : depthFormatCandidates)
+        {
+            VkFormatProperties properties {};
+            vkGetPhysicalDeviceFormatProperties(
+                physicalDevice, candidate.vkFormat, &properties);
+            constexpr VkFormatFeatureFlags requiredFeatures =
+                VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures)
+            {
+                depthFormat = candidate.nvrhiFormat;
+                break;
+            }
+        }
+
+        nvrhi::TextureDesc wholeDepthDesc {};
+        wholeDepthDesc.width = 4;
+        wholeDepthDesc.height = 4;
+        wholeDepthDesc.format = depthFormat;
+        wholeDepthDesc.isRenderTarget = true;
+        wholeDepthDesc.debugName = "SampledReadOnlyDepthWhole";
+        nvrhi::TextureHandle wholeDepthTexture;
+        nvrhi::TextureHandle mipDepthTexture;
+        if (depthFormat != nvrhi::Format::UNKNOWN)
+        {
+            wholeDepthTexture = device->createTexture(wholeDepthDesc);
+            nvrhi::TextureDesc mipDepthDesc = wholeDepthDesc;
+            mipDepthDesc.mipLevels = 2;
+            mipDepthDesc.debugName = "SampledReadOnlyDepthSubresource";
+            mipDepthTexture = device->createTexture(mipDepthDesc);
+        }
+
+        nvrhi::BindingLayoutDesc depthLayoutBindingDesc {};
+        depthLayoutBindingDesc.visibility = nvrhi::ShaderType::Pixel;
+        depthLayoutBindingDesc.bindings = {
+            nvrhi::BindingLayoutItem::Texture_SRV(0)
+        };
+        nvrhi::BindingLayoutHandle depthBindingLayout =
+            device->createBindingLayout(depthLayoutBindingDesc);
+
+        const auto createSampledDepthSet = [&](nvrhi::ITexture* texture,
+                                                bool automaticTransitions) {
+            nvrhi::BindingSetItem item =
+                nvrhi::BindingSetItem::Texture_SRV(0, texture);
+            item.setDepthReadOnlyAttachment(true)
+                .setEnableAutomaticTransitions(automaticTransitions);
+            nvrhi::BindingSetDesc desc {};
+            desc.bindings = { item };
+            return texture && depthBindingLayout
+                ? device->createBindingSet(desc, depthBindingLayout)
+                : nvrhi::BindingSetHandle {};
+        };
+
+        nvrhi::BindingSetHandle wholeDepthSet =
+            createSampledDepthSet(wholeDepthTexture.Get(), true);
+        nvrhi::BindingSetHandle optedOutDepthSet =
+            createSampledDepthSet(wholeDepthTexture.Get(), false);
+        nvrhi::BindingSetHandle mipDepthSet =
+            createSampledDepthSet(mipDepthTexture.Get(), true);
+
+        nvrhi::FramebufferAttachment wholeDepthAttachment {};
+        wholeDepthAttachment.setTexture(wholeDepthTexture.Get()).setReadOnly(true);
+        nvrhi::FramebufferHandle wholeDepthFramebuffer = wholeDepthTexture
+            ? device->createFramebuffer(
+                nvrhi::FramebufferDesc().setDepthAttachment(wholeDepthAttachment))
+            : nvrhi::FramebufferHandle {};
+
+        const nvrhi::TextureSubresourceSet secondMip(1, 1, 0, 1);
+        nvrhi::FramebufferAttachment mipDepthAttachment {};
+        mipDepthAttachment.setTexture(mipDepthTexture.Get())
+            .setSubresources(secondMip)
+            .setReadOnly(true);
+        nvrhi::FramebufferHandle mipDepthFramebuffer = mipDepthTexture
+            ? device->createFramebuffer(
+                nvrhi::FramebufferDesc().setDepthAttachment(mipDepthAttachment))
+            : nvrhi::FramebufferHandle {};
+
+        nvrhi::CommandListHandle depthCommandList = device->createCommandList();
+        bool sampledDepthTrackingPassed = depthFormat != nvrhi::Format::UNKNOWN
+            && wholeDepthTexture && mipDepthTexture && depthBindingLayout
+            && wholeDepthSet && optedOutDepthSet && mipDepthSet
+            && wholeDepthFramebuffer && mipDepthFramebuffer && depthCommandList;
+        if (sampledDepthTrackingPassed)
+        {
+            const auto* wholeVkSet = static_cast<const nvrhi::vulkan::BindingSet*>(
+                wholeDepthSet.Get());
+            const auto* optedOutVkSet = static_cast<const nvrhi::vulkan::BindingSet*>(
+                optedOutDepthSet.Get());
+            sampledDepthTrackingPassed =
+                wholeVkSet->hasDepthReadOnlyAttachmentBindings
+                && !optedOutVkSet->hasDepthReadOnlyAttachmentBindings;
+
+            depthCommandList->open();
+            depthCommandList->beginTrackingTextureState(
+                wholeDepthTexture, nvrhi::AllSubresources,
+                nvrhi::ResourceStates::Common);
+            depthCommandList->setResourceStatesForBindingSet(wholeDepthSet);
+            depthCommandList->setResourceStatesForFramebuffer(wholeDepthFramebuffer);
+            sampledDepthTrackingPassed &=
+                depthCommandList->getTextureSubresourceState(
+                    wholeDepthTexture, 0, 0) == sampledDepthState;
+
+            depthCommandList->beginTrackingTextureState(
+                mipDepthTexture, nvrhi::AllSubresources,
+                nvrhi::ResourceStates::Common);
+            depthCommandList->setResourceStatesForBindingSet(mipDepthSet);
+            depthCommandList->setResourceStatesForFramebuffer(mipDepthFramebuffer);
+            sampledDepthTrackingPassed &=
+                depthCommandList->getTextureSubresourceState(
+                    mipDepthTexture, 0, 0) == sampledDepthState
+                && depthCommandList->getTextureSubresourceState(
+                    mipDepthTexture, 0, 1) == sampledDepthState;
+            depthCommandList->close();
+            const uint64_t depthSubmitId =
+                device->executeCommandList(depthCommandList);
+            sampledDepthTrackingPassed &= depthSubmitId != 0
+                && waitTimeline(
+                    vkDevice,
+                    device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
+                    depthSubmitId);
+        }
+        passed &= sampledDepthTrackingPassed;
+        if (!sampledDepthTrackingPassed)
+            std::cerr << "Sampled read-only depth binding/framebuffer state test failed\n";
+    }
 
     std::vector<VkSemaphore> semaphores;
     auto timeline = [&](uint64_t initialValue = 0) {

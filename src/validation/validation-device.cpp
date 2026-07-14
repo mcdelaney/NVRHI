@@ -1535,6 +1535,12 @@ namespace nvrhi::validation
         IBindingLayout* pBindingLayout = pOptDescriptorTable ? pOptDescriptorTable->getLayout() : nullptr;
         const BindlessLayoutDesc* pBindlessLayoutDesc = pBindingLayout ? pBindingLayout->getBindlessDesc() : nullptr;
 
+        if (binding.depthReadOnlyAttachment && binding.type != ResourceType::Texture_SRV)
+        {
+            errorStream << "BindingSetItem::depthReadOnlyAttachment is only valid for Texture_SRV bindings." << std::endl;
+            return false;
+        }
+
         if (pBindlessLayoutDesc)
         {
             if (pBindlessLayoutDesc->layoutType == BindlessLayoutDesc::LayoutType::MutableSrvUavCbv)
@@ -1613,6 +1619,18 @@ namespace nvrhi::validation
             }
 
             const TextureDesc& desc = texture->getDesc();
+
+            if (binding.depthReadOnlyAttachment)
+            {
+                const FormatInfo& formatInfo = getFormatInfo(desc.format);
+                if (!formatInfo.hasDepth && !formatInfo.hasStencil)
+                {
+                    errorStream << "Texture " << utils::DebugNameToString(desc.debugName)
+                        << " cannot use BindingSetItem::depthReadOnlyAttachment because its format has no depth or stencil aspect."
+                        << std::endl;
+                    return false;
+                }
+            }
 
             TextureSubresourceSet subresources = binding.subresources.resolve(desc, false);
             if (subresources.numArraySlices == 0 || subresources.numMipLevels == 0)

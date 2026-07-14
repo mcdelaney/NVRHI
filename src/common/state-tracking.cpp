@@ -28,6 +28,26 @@
 
 namespace nvrhi
 {
+    namespace
+    {
+        const ResourceStates c_ShaderDepthRead =
+            ResourceStates::ShaderResource | ResourceStates::DepthRead;
+
+        ResourceStates preserveShaderDepthReadState(ResourceStates currentState, ResourceStates requiredState)
+        {
+            // A texture sampled while it is a read-only depth attachment must retain
+            // both usages. A later framebuffer DepthRead requirement is a subset of
+            // that state and must not narrow the tracked state or Vulkan layout.
+            if (requiredState == ResourceStates::DepthRead
+                && (currentState & c_ShaderDepthRead) == c_ShaderDepthRead)
+            {
+                return currentState;
+            }
+
+            return requiredState;
+        }
+    }
+
     bool verifyPermanentResourceState(ResourceStates permanentState, ResourceStates requiredState, bool isTexture, const std::string& debugName, IMessageCallback* messageCallback)
     {
         if ((permanentState & requiredState) != requiredState)
@@ -185,8 +205,9 @@ namespace nvrhi
         {
             // We're requiring state for the entire texture, and it's been tracked as entire texture too
 
-            bool transitionNecessary = tracking->state != state;
-            bool uavNecessary = ((state & ResourceStates::UnorderedAccess) != 0)
+            const ResourceStates effectiveState = preserveShaderDepthReadState(tracking->state, state);
+            bool transitionNecessary = tracking->state != effectiveState;
+            bool uavNecessary = ((effectiveState & ResourceStates::UnorderedAccess) != 0)
                 && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
 
             if (transitionNecessary || uavNecessary)
@@ -195,11 +216,11 @@ namespace nvrhi
                 barrier.texture = texture;
                 barrier.entireTexture = true;
                 barrier.stateBefore = tracking->state;
-                barrier.stateAfter = state;
+                barrier.stateAfter = effectiveState;
                 m_TextureBarriers.push_back(barrier);
             }
 
-            tracking->state = state;
+            tracking->state = effectiveState;
 
             if (uavNecessary && !transitionNecessary)
             {
@@ -228,6 +249,7 @@ namespace nvrhi
                     uint32_t subresourceIndex = calcSubresource(mipLevel, arraySlice, texture->descRef);
 
                     auto priorState = tracking->subresourceStates[subresourceIndex];
+                    const ResourceStates effectiveState = preserveShaderDepthReadState(priorState, state);
 
                     if (priorState == ResourceStates::Unknown && !stateExpanded)
                     {
@@ -239,8 +261,8 @@ namespace nvrhi
                         m_MessageCallback->message(MessageSeverity::Error, ss.str().c_str());
                     }
                     
-                    bool transitionNecessary = priorState != state;
-                    bool uavNecessary = ((state & ResourceStates::UnorderedAccess) != 0)
+                    bool transitionNecessary = priorState != effectiveState;
+                    bool uavNecessary = ((effectiveState & ResourceStates::UnorderedAccess) != 0)
                         && !anyUavBarrier && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
 
                     if (transitionNecessary || uavNecessary)
@@ -251,11 +273,11 @@ namespace nvrhi
                         barrier.mipLevel = mipLevel;
                         barrier.arraySlice = arraySlice;
                         barrier.stateBefore = priorState;
-                        barrier.stateAfter = state;
+                        barrier.stateAfter = effectiveState;
                         m_TextureBarriers.push_back(barrier);
                     }
 
-                    tracking->subresourceStates[subresourceIndex] = state;
+                    tracking->subresourceStates[subresourceIndex] = effectiveState;
 
                     if (uavNecessary && !transitionNecessary)
                     {

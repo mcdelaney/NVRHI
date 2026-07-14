@@ -397,6 +397,13 @@ namespace nvrhi::vulkan
             case ResourceType::Texture_SRV:
             {
                 const auto texture = checked_cast<Texture *>(binding.resourceHandle);
+                const ResourceStates requiredState = getTextureSrvState(binding);
+                if (binding.depthReadOnlyAttachment)
+                {
+                    const FormatInfo& formatInfo = getFormatInfo(texture->desc.format);
+                    assert(formatInfo.hasDepth || formatInfo.hasStencil);
+                    (void)formatInfo;
+                }
 
                 const auto subresource = binding.subresources.resolve(texture->desc, false);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
@@ -405,7 +412,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(convertTextureLayout(ResourceStates::ShaderResource, texture->desc));
+                    .setImageLayout(convertTextureLayout(requiredState, texture->desc));
 
                 generateWriteDescriptorData(
                     registerOffset + binding.slot,
@@ -417,7 +424,7 @@ namespace nvrhi::vulkan
                     ret->bindingsThatNeedTransitions.push_back(static_cast<uint16_t>(bindingIndex));
                 else
                     verifyPermanentResourceState(texture->permanentState,
-                        ResourceStates::ShaderResource,
+                        requiredState,
                         true, texture->desc.debugName, m_Context.messageCallback);
             }
 
@@ -626,6 +633,13 @@ namespace nvrhi::vulkan
                 break;
             }
 
+            if (binding.type == ResourceType::Texture_SRV)
+            {
+                ret->hasDepthReadOnlyAttachmentBindings |=
+                    binding.depthReadOnlyAttachment
+                    && binding.enableAutomaticTransitions;
+            }
+
         }
 
         m_Context.device.updateDescriptorSets(uint32_t(descriptorWriteInfo.size()), descriptorWriteInfo.data(), 0, nullptr);
@@ -772,6 +786,13 @@ namespace nvrhi::vulkan
             case ResourceType::Texture_SRV:
             {
                 const auto& texture = checked_cast<Texture*>(binding.resourceHandle);
+                const ResourceStates requiredState = getTextureSrvState(binding);
+                if (binding.depthReadOnlyAttachment)
+                {
+                    const FormatInfo& formatInfo = getFormatInfo(texture->desc.format);
+                    assert(formatInfo.hasDepth || formatInfo.hasStencil);
+                    (void)formatInfo;
+                }
 
                 const auto subresource = binding.subresources.resolve(texture->desc, false);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
@@ -780,7 +801,7 @@ namespace nvrhi::vulkan
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
                     .setImageView(view.view)
-                    .setImageLayout(convertTextureLayout(ResourceStates::ShaderResource, texture->desc));
+                    .setImageLayout(convertTextureLayout(requiredState, texture->desc));
 
                 generateWriteDescriptorData(layoutBinding.binding,
                     convertResourceType(binding.type),
