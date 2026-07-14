@@ -113,6 +113,12 @@ namespace nvrhi
 
         ResourceStates getTextureSubresourceState(TextureStateExtension* texture, ArraySlice arraySlice, MipLevel mipLevel);
         ResourceStates getBufferState(BufferStateExtension* buffer);
+        ShaderType getTextureSubresourceShaderStages(TextureStateExtension* texture, ArraySlice arraySlice, MipLevel mipLevel);
+        ShaderType getBufferShaderStages(BufferStateExtension* buffer);
+        bool isTextureStateTracked(TextureStateExtension* texture, TextureSubresourceSet subresources);
+        bool isBufferStateTracked(BufferStateExtension* buffer);
+        bool hasPendingPermanentTextureState(TextureStateExtension* texture);
+        bool hasPendingPermanentBufferState(BufferStateExtension* buffer);
 
         // Internal interface
         

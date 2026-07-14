@@ -232,6 +232,7 @@ namespace nvrhi
         requireBufferState(buffer, stateBits);
 
         m_PermanentBufferStates.push_back(std::make_pair(buffer, stateBits));
+        getBufferStateTracking(buffer, true)->permanentTransition = true;
     }
 
     ResourceStates CommandListResourceStateTracker::getTextureSubresourceState(TextureStateExtension* texture, ArraySlice arraySlice, MipLevel mipLevel)
@@ -260,6 +261,92 @@ namespace nvrhi
             return ResourceStates::Unknown;
 
         return tracking->state;
+    }
+
+    ShaderType CommandListResourceStateTracker::getTextureSubresourceShaderStages(
+        TextureStateExtension* texture,
+        ArraySlice arraySlice,
+        MipLevel mipLevel)
+    {
+        TextureState* tracking = getTextureStateTracking(texture, false);
+        if (!tracking)
+        {
+            if (texture->descRef.keepInitialState)
+            {
+                const ResourceStates state = texture->stateInitialized
+                    ? texture->descRef.initialState : ResourceStates::Common;
+                return normalizeShaderStages(state, ShaderType::All);
+            }
+            return ShaderType::None;
+        }
+
+        if (tracking->subresourceShaderStages.empty())
+            return tracking->shaderStages;
+
+        const uint32_t subresource = calcSubresource(
+            mipLevel, arraySlice, texture->descRef);
+        return tracking->subresourceShaderStages[subresource];
+    }
+
+    ShaderType CommandListResourceStateTracker::getBufferShaderStages(
+        BufferStateExtension* buffer)
+    {
+        BufferState* tracking = getBufferStateTracking(buffer, false);
+        return tracking ? tracking->shaderStages : ShaderType::None;
+    }
+
+    bool CommandListResourceStateTracker::isTextureStateTracked(
+        TextureStateExtension* texture,
+        TextureSubresourceSet subresources)
+    {
+        TextureState* tracking = getTextureStateTracking(texture, false);
+        if (!tracking)
+            return false;
+
+        subresources = subresources.resolve(texture->descRef, false);
+        if (tracking->subresourceStates.empty())
+            return tracking->state != ResourceStates::Unknown;
+
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                const uint32_t subresource = calcSubresource(
+                    mipLevel, arraySlice, texture->descRef);
+                if (tracking->subresourceStates[subresource]
+                    != ResourceStates::Unknown)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool CommandListResourceStateTracker::isBufferStateTracked(
+        BufferStateExtension* buffer)
+    {
+        BufferState* tracking = getBufferStateTracking(buffer, false);
+        return tracking && tracking->state != ResourceStates::Unknown;
+    }
+
+    bool CommandListResourceStateTracker::hasPendingPermanentTextureState(
+        TextureStateExtension* texture)
+    {
+        TextureState* tracking = getTextureStateTracking(texture, false);
+        return tracking && tracking->permanentTransition;
+    }
+
+    bool CommandListResourceStateTracker::hasPendingPermanentBufferState(
+        BufferStateExtension* buffer)
+    {
+        BufferState* tracking = getBufferStateTracking(buffer, false);
+        return tracking && tracking->permanentTransition;
     }
     
     void CommandListResourceStateTracker::requireTextureState(

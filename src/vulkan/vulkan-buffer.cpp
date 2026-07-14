@@ -126,6 +126,9 @@ namespace nvrhi::vulkan
                 .setQueueFamilyIndexCount(static_cast<uint32_t>(m_ConcurrentQueueFamilyIndices.size()))
                 .setPQueueFamilyIndices(m_ConcurrentQueueFamilyIndices.data());
         }
+        buffer->queueSharingMode = bufferInfo.sharingMode == vk::SharingMode::eConcurrent
+            ? QueueSharingMode::Concurrent
+            : QueueSharingMode::Exclusive;
 
 #if _WIN32
         const auto handleType = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
@@ -221,6 +224,7 @@ namespace nvrhi::vulkan
         buffer->buffer = VkBuffer(_buffer.integer);
         buffer->desc = desc;
         buffer->managed = false;
+        buffer->queueSharingMode = QueueSharingMode::UnknownNative;
         
         if (m_Context.extensions.buffer_device_address)
         {

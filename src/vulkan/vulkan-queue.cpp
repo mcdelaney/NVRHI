@@ -562,6 +562,29 @@ namespace nvrhi::vulkan
         return m_Context.device.getSemaphoreCounterValue(getQueueSemaphore(queue));
     }
 
+    uint32_t Device::getQueueFamilyIndex(CommandQueue queue) const
+    {
+        if (queue >= CommandQueue::Count)
+            return UINT32_MAX;
+        const Queue* vulkanQueue = m_Queues[uint32_t(queue)].get();
+        return vulkanQueue ? vulkanQueue->getQueueFamilyIndex() : UINT32_MAX;
+    }
+
+    bool Device::supportsEfficientQueueOwnershipTransfer(
+        CommandQueue sourceQueue, CommandQueue destinationQueue) const
+    {
+        const uint32_t sourceFamily = getQueueFamilyIndex(sourceQueue);
+        const uint32_t destinationFamily = getQueueFamilyIndex(destinationQueue);
+        if (sourceFamily == UINT32_MAX || destinationFamily == UINT32_MAX
+            || sourceQueue == destinationQueue)
+        {
+            return false;
+        }
+
+        return sourceFamily == destinationFamily
+            || m_Context.extensions.KHR_maintenance8;
+    }
+
     bool Queue::pollCommandList(uint64_t commandListID)
     {
         if (commandListID > m_LastSubmittedID || commandListID == 0)

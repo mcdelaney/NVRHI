@@ -67,6 +67,9 @@ namespace nvrhi::vulkan
         // would overwrite recording-version state that must instead be retried.
         assert(!m_CurrentCmdBuf && "Cannot reopen an unsubmitted command list");
 
+        m_ReleasedTextureRanges.clear();
+        m_ReleasedBuffers.clear();
+
         m_CurrentCmdBuf = m_Device->getQueue(m_CommandListParameters.queueType)->getOrCreateCommandBuffer();
 
         auto beginInfo = vk::CommandBufferBeginInfo()
@@ -95,6 +98,9 @@ namespace nvrhi::vulkan
 
         m_CurrentCmdBuf->cmdBuf.end();
 
+        m_ReleasedTextureRanges.clear();
+        m_ReleasedBuffers.clear();
+
         clearState();
 
         flushVolatileBufferWrites();
@@ -105,6 +111,11 @@ namespace nvrhi::vulkan
     void CommandList::clearState()
     {
         endRenderPass();
+
+        // Do not clear m_ReleasedTextureRanges or m_ReleasedBuffers here.
+        // clearState() is public and may be called while recording; ownership
+        // release remains the final local use for the entire command buffer.
+        // The markers are reset only at recording boundaries in open/close.
 
         m_CurrentPipelineLayout = vk::PipelineLayout();
         m_CurrentPushConstantsVisibility = vk::ShaderStageFlagBits();

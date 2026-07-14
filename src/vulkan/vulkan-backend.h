@@ -29,6 +29,7 @@
 #include "../common/versioning.h"
 #include <mutex>
 #include <list>
+#include <unordered_set>
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
@@ -51,6 +52,13 @@
 
 namespace nvrhi::vulkan
 {
+    enum class QueueSharingMode : uint8_t
+    {
+        Exclusive,
+        Concurrent,
+        UnknownNative
+    };
+
     class Texture;
     class StagingTexture;
     class InputLayout;
@@ -85,6 +93,21 @@ namespace nvrhi::vulkan
     ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc,
         ShaderType shaderStages = ShaderType::All);
     vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc);
+    namespace detail
+    {
+        vk::ImageMemoryBarrier2 buildQueueOwnershipImageBarrier(
+            vk::Image image, const vk::ImageSubresourceRange& subresources,
+            const ResourceStateMapping& before, const ResourceStateMapping& after,
+            uint32_t sourceQueueFamily, uint32_t destinationQueueFamily,
+            bool release, bool sameFamily);
+        vk::BufferMemoryBarrier2 buildQueueOwnershipBufferBarrier(
+            vk::Buffer buffer, vk::DeviceSize size,
+            const ResourceStateMapping& before, const ResourceStateMapping& after,
+            uint32_t sourceQueueFamily, uint32_t destinationQueueFamily,
+            bool release, bool sameFamily);
+        vk::DependencyFlags queueOwnershipDependencyFlags(
+            bool sameFamily, bool maintenance8Enabled);
+    }
     inline ResourceStates getTextureSrvState(const BindingSetItem& binding)
     {
         return binding.depthReadOnlyAttachment
@@ -159,6 +182,7 @@ namespace nvrhi::vulkan
             bool KHR_ray_tracing_pipeline = false;
             bool EXT_mesh_shader = false;
             bool KHR_fragment_shading_rate = false;
+            bool KHR_maintenance8 = false;
             bool EXT_conservative_rasterization = false;
             bool EXT_opacity_micromap = false;
             bool NV_ray_tracing_invocation_reorder = false;
@@ -504,6 +528,7 @@ namespace nvrhi::vulkan
 
         
         TextureDesc desc;
+        QueueSharingMode queueSharingMode = QueueSharingMode::UnknownNative;
 
         vk::ImageCreateInfo imageInfo;
         vk::ExternalMemoryImageCreateInfo externalMemoryImageInfo;
@@ -652,6 +677,7 @@ namespace nvrhi::vulkan
     {
     public:
         BufferDesc desc;
+        QueueSharingMode queueSharingMode = QueueSharingMode::UnknownNative;
 
         vk::Buffer buffer;
         vk::DeviceAddress deviceAddress = 0;
@@ -1299,6 +1325,9 @@ namespace nvrhi::vulkan
         void queueWaitForSemaphore(CommandQueue waitQueue, VkSemaphore semaphore, uint64_t value) override;
         void queueSignalSemaphore(CommandQueue executionQueue, VkSemaphore semaphore, uint64_t value) override;
         uint64_t queueGetCompletedInstance(CommandQueue queue) override;
+        uint32_t getQueueFamilyIndex(CommandQueue queue) const override;
+        bool supportsEfficientQueueOwnershipTransfer(
+            CommandQueue sourceQueue, CommandQueue destinationQueue) const override;
         std::mutex& getQueueMutex(CommandQueue queue) override;
         uint64_t executeCommandListsWithSyncIsolated(
             ICommandList* const* pCommandLists, size_t numCommandLists,
@@ -1319,6 +1348,20 @@ namespace nvrhi::vulkan
         void queueWaitForCommandListAtStage(
             CommandQueue waitQueue, CommandQueue executionQueue, uint64_t instance,
             VkPipelineStageFlags2 waitStageMask) override;
+        bool releaseTextureQueueOwnership(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const QueueOwnershipTransferDesc& transfer) override;
+        bool acquireTextureQueueOwnership(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const QueueOwnershipTransferDesc& transfer) override;
+        bool releaseBufferQueueOwnership(
+            ICommandList* commandList, IBuffer* buffer,
+            const QueueOwnershipTransferDesc& transfer) override;
+        bool acquireBufferQueueOwnership(
+            ICommandList* commandList, IBuffer* buffer,
+            const QueueOwnershipTransferDesc& transfer) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
@@ -1361,6 +1404,12 @@ namespace nvrhi::vulkan
         ~CommandList() override;
 
         void executed(Queue& queue, CommandQueue executionQueue, uint64_t submissionID);
+        bool recordTextureQueueOwnershipTransfer(
+            Texture* texture, TextureSubresourceSet subresources,
+            const QueueOwnershipTransferDesc& transfer, bool release);
+        bool recordBufferQueueOwnershipTransfer(
+            Buffer* buffer, const QueueOwnershipTransferDesc& transfer,
+            bool release);
 
         // IResource implementation
 
@@ -1487,6 +1536,14 @@ namespace nvrhi::vulkan
         bool m_AnyVolatileBufferWrites = false;
         bool m_BindingStatesDirty = false;
 
+        struct ReleasedTextureRange
+        {
+            Texture* texture = nullptr;
+            TextureSubresourceSet subresources;
+        };
+        std::vector<ReleasedTextureRange> m_ReleasedTextureRanges;
+        std::unordered_set<Buffer*> m_ReleasedBuffers;
+
         std::unordered_map<rt::IShaderTable*, std::unique_ptr<ShaderTableState>> m_UncachedShaderTableStates;
         ShaderTableState& getShaderTableState(rt::IShaderTable* shaderTable);
 
@@ -1536,6 +1593,8 @@ namespace nvrhi::vulkan
             ResourceStates state, ShaderType shaderStages = ShaderType::All);
         void requireBufferState(IBuffer* buffer, ResourceStates state,
             ShaderType shaderStages = ShaderType::All);
+        bool isTextureRangeReleased(Texture* texture, TextureSubresourceSet subresources) const;
+        void reportReleasedResourceUse(const char* resourceKind, const std::string& debugName) const;
         bool anyBarriers() const;
 
         void buildTopLevelAccelStructInternal(AccelStruct* as, VkDeviceAddress instanceData, size_t numInstances, rt::AccelStructBuildFlags buildFlags, uint64_t currentVersion);

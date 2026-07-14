@@ -209,6 +209,20 @@ namespace
         return false;
     }
 
+    bool hasDeviceExtension(VkPhysicalDevice physicalDevice, const char* name)
+    {
+        uint32_t count = 0;
+        vkEnumerateDeviceExtensionProperties(
+            physicalDevice, nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> extensions(count);
+        vkEnumerateDeviceExtensionProperties(
+            physicalDevice, nullptr, &count, extensions.data());
+        for (const auto& extension : extensions)
+            if (std::strcmp(extension.extensionName, name) == 0)
+                return true;
+        return false;
+    }
+
     VkSemaphore createSemaphore(VkDevice device, bool timeline, uint64_t initialValue = 0)
     {
         VkSemaphoreTypeCreateInfo typeInfo { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
@@ -354,12 +368,21 @@ int main()
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex = UINT32_MAX;
+    uint32_t distinctTransferQueueFamilyIndex = UINT32_MAX;
     bool supportsDescriptorUpdateAfterBindProbe = false;
+    bool supportsMaintenance8 = false;
     for (VkPhysicalDevice candidate : physicalDevices)
     {
+        const bool candidateHasMaintenance8 = hasDeviceExtension(
+            candidate, VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+        VkPhysicalDeviceMaintenance8FeaturesKHR supportedMaintenance8 {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR
+        };
         VkPhysicalDeviceVulkan13Features supported13 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
         VkPhysicalDeviceVulkan12Features supported12 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
         supported12.pNext = &supported13;
+        supported13.pNext = candidateHasMaintenance8
+            ? &supportedMaintenance8 : nullptr;
         VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
         supported.pNext = &supported12;
         vkGetPhysicalDeviceFeatures2(candidate, &supported);
@@ -374,21 +397,45 @@ int main()
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, nullptr);
         std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, queueFamilies.data());
+        uint32_t candidateGraphicsFamily = UINT32_MAX;
         for (uint32_t i = 0; i < queueFamilyCount; ++i)
         {
             if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0
                 && queueFamilies[i].timestampValidBits != 0)
             {
-                physicalDevice = candidate;
-                queueFamilyIndex = i;
-                supportsDescriptorUpdateAfterBindProbe =
-                    supported12.descriptorIndexing
-                    && supported12.descriptorBindingPartiallyBound
-                    && supported12.descriptorBindingSampledImageUpdateAfterBind
-                    && supported12.descriptorBindingUpdateUnusedWhilePending;
+                candidateGraphicsFamily = i;
                 break;
             }
         }
+        if (candidateGraphicsFamily == UINT32_MAX)
+            continue;
+
+        uint32_t candidateTransferFamily = UINT32_MAX;
+        for (uint32_t i = 0; i < queueFamilyCount; ++i)
+        {
+            if (i == candidateGraphicsFamily
+                || (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) == 0)
+            {
+                continue;
+            }
+            candidateTransferFamily = i;
+            if ((queueFamilies[i].queueFlags
+                    & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0)
+            {
+                break;
+            }
+        }
+
+        physicalDevice = candidate;
+        queueFamilyIndex = candidateGraphicsFamily;
+        distinctTransferQueueFamilyIndex = candidateTransferFamily;
+        supportsDescriptorUpdateAfterBindProbe =
+            supported12.descriptorIndexing
+            && supported12.descriptorBindingPartiallyBound
+            && supported12.descriptorBindingSampledImageUpdateAfterBind
+            && supported12.descriptorBindingUpdateUnusedWhilePending;
+        supportsMaintenance8 = candidateHasMaintenance8
+            && supportedMaintenance8.maintenance8;
         if (physicalDevice)
             break;
     }
@@ -396,12 +443,27 @@ int main()
         return 1;
 
     const float queuePriority = 1.f;
-    VkDeviceQueueCreateInfo queueInfo { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
-    queueInfo.queueFamilyIndex = queueFamilyIndex;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &queuePriority;
+    std::array<VkDeviceQueueCreateInfo, 2> queueInfos {};
+    queueInfos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueInfos[0].queueFamilyIndex = queueFamilyIndex;
+    queueInfos[0].queueCount = 1;
+    queueInfos[0].pQueuePriorities = &queuePriority;
+    uint32_t queueInfoCount = 1;
+    if (distinctTransferQueueFamilyIndex != UINT32_MAX)
+    {
+        queueInfos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueInfos[1].queueFamilyIndex = distinctTransferQueueFamilyIndex;
+        queueInfos[1].queueCount = 1;
+        queueInfos[1].pQueuePriorities = &queuePriority;
+        queueInfoCount = 2;
+    }
+    VkPhysicalDeviceMaintenance8FeaturesKHR enabledMaintenance8 {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR
+    };
+    enabledMaintenance8.maintenance8 = supportsMaintenance8 ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceVulkan13Features enabled13 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     enabled13.synchronization2 = VK_TRUE;
+    enabled13.pNext = supportsMaintenance8 ? &enabledMaintenance8 : nullptr;
     VkPhysicalDeviceVulkan12Features enabled12 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     enabled12.pNext = &enabled13;
     enabled12.timelineSemaphore = VK_TRUE;
@@ -414,14 +476,27 @@ int main()
     }
     VkDeviceCreateInfo deviceInfo { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     deviceInfo.pNext = &enabled12;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.queueCreateInfoCount = queueInfoCount;
+    deviceInfo.pQueueCreateInfos = queueInfos.data();
+    std::array<const char*, 1> deviceExtensions = {
+        VK_KHR_MAINTENANCE_8_EXTENSION_NAME
+    };
+    deviceInfo.enabledExtensionCount = supportsMaintenance8 ? 1u : 0u;
+    deviceInfo.ppEnabledExtensionNames = supportsMaintenance8
+        ? deviceExtensions.data() : nullptr;
 
     VkDevice vkDevice = VK_NULL_HANDLE;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &vkDevice) != VK_SUCCESS)
         return 1;
     VkQueue queue = VK_NULL_HANDLE;
     vkGetDeviceQueue(vkDevice, queueFamilyIndex, 0, &queue);
+    VkQueue distinctTransferQueue = VK_NULL_HANDLE;
+    if (distinctTransferQueueFamilyIndex != UINT32_MAX)
+    {
+        vkGetDeviceQueue(
+            vkDevice, distinctTransferQueueFamilyIndex, 0,
+            &distinctTransferQueue);
+    }
     VULKAN_HPP_DEFAULT_DISPATCHER.init(instance, vkGetInstanceProcAddr, vkDevice);
 
     MessageCallback messageCallback;
@@ -430,6 +505,10 @@ int main()
     nvrhiDesc.instance = instance;
     nvrhiDesc.physicalDevice = physicalDevice;
     nvrhiDesc.device = vkDevice;
+    nvrhiDesc.deviceExtensions = supportsMaintenance8
+        ? deviceExtensions.data() : nullptr;
+    nvrhiDesc.numDeviceExtensions = supportsMaintenance8 ? 1u : 0u;
+    nvrhiDesc.maintenance8Supported = supportsMaintenance8;
     nvrhiDesc.graphicsQueue = queue;
     nvrhiDesc.graphicsQueueIndex = int(queueFamilyIndex);
     // Bind all three logical queues to one physical VkQueue. Besides keeping
@@ -556,6 +635,133 @@ int main()
                 vk::AccessFlagBits2::eShaderRead
                     | vk::AccessFlagBits2::eDepthStencilAttachmentRead);
 
+        // Queue-family ownership transfers are deliberately split into an
+        // immediate release barrier and an immediate acquire barrier. A
+        // same-family transfer collapses to one ordinary transition.
+        {
+            const nvrhi::vulkan::QueueOwnershipTransferDesc defaultTransfer {};
+            nvrhi::TextureDesc ownershipTextureDesc {};
+            ownershipTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            const auto ownershipBefore = nvrhi::vulkan::convertTextureState(
+                nvrhi::ResourceStates::CopyDest, ownershipTextureDesc);
+            const auto ownershipAfter = nvrhi::vulkan::convertTextureState(
+                nvrhi::ResourceStates::ShaderResource,
+                ownershipTextureDesc, nvrhi::ShaderType::Pixel);
+            const auto imageRange = vk::ImageSubresourceRange()
+                .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                .setBaseMipLevel(0)
+                .setLevelCount(1)
+                .setBaseArrayLayer(0)
+                .setLayerCount(1);
+
+            const auto imageRelease =
+                nvrhi::vulkan::detail::buildQueueOwnershipImageBarrier(
+                    {}, imageRange, ownershipBefore, ownershipAfter,
+                    3, 5, true, false);
+            const auto imageAcquire =
+                nvrhi::vulkan::detail::buildQueueOwnershipImageBarrier(
+                    {}, imageRange, ownershipBefore, ownershipAfter,
+                    3, 5, false, false);
+            const auto imageSameFamily =
+                nvrhi::vulkan::detail::buildQueueOwnershipImageBarrier(
+                    {}, imageRange, ownershipBefore, ownershipAfter,
+                    3, 3, true, true);
+
+            const auto bufferRelease =
+                nvrhi::vulkan::detail::buildQueueOwnershipBufferBarrier(
+                    {}, 64, copyDest, fragmentSrv, 3, 5, true, false);
+            const auto bufferAcquire =
+                nvrhi::vulkan::detail::buildQueueOwnershipBufferBarrier(
+                    {}, 64, copyDest, fragmentSrv, 3, 5, false, false);
+            const auto bufferSameFamily =
+                nvrhi::vulkan::detail::buildQueueOwnershipBufferBarrier(
+                    {}, 64, copyDest, fragmentSrv, 3, 3, true, true);
+            const vk::DependencyFlags maintenance8OwnershipFlag =
+                vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
+
+            mappingPassed &= nvrhi::c_HeaderVersion == 27
+                && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
+                && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
+                && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
+                && defaultTransfer.stateAfter == nvrhi::ResourceStates::Unknown
+                && imageRelease.srcStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && imageRelease.srcAccessMask
+                    == vk::AccessFlagBits2::eTransferWrite
+                && imageRelease.dstStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && !imageRelease.dstAccessMask
+                && imageRelease.oldLayout
+                    == vk::ImageLayout::eTransferDstOptimal
+                && imageRelease.newLayout
+                    == vk::ImageLayout::eShaderReadOnlyOptimal
+                && imageRelease.srcQueueFamilyIndex == 3
+                && imageRelease.dstQueueFamilyIndex == 5
+                && imageAcquire.srcStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && !imageAcquire.srcAccessMask
+                && imageAcquire.dstStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && imageAcquire.dstAccessMask
+                    == vk::AccessFlagBits2::eShaderRead
+                && imageAcquire.oldLayout
+                    == vk::ImageLayout::eTransferDstOptimal
+                && imageAcquire.newLayout
+                    == vk::ImageLayout::eShaderReadOnlyOptimal
+                && imageAcquire.srcQueueFamilyIndex == 3
+                && imageAcquire.dstQueueFamilyIndex == 5
+                && imageSameFamily.srcStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && imageSameFamily.srcAccessMask
+                    == vk::AccessFlagBits2::eTransferWrite
+                && imageSameFamily.dstStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && imageSameFamily.dstAccessMask
+                    == vk::AccessFlagBits2::eShaderRead
+                && imageSameFamily.srcQueueFamilyIndex
+                    == VK_QUEUE_FAMILY_IGNORED
+                && imageSameFamily.dstQueueFamilyIndex
+                    == VK_QUEUE_FAMILY_IGNORED
+                && bufferRelease.srcStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && bufferRelease.srcAccessMask
+                    == vk::AccessFlagBits2::eTransferWrite
+                && bufferRelease.dstStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && !bufferRelease.dstAccessMask
+                && bufferRelease.srcQueueFamilyIndex == 3
+                && bufferRelease.dstQueueFamilyIndex == 5
+                && bufferRelease.offset == 0
+                && bufferRelease.size == 64
+                && bufferAcquire.srcStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && !bufferAcquire.srcAccessMask
+                && bufferAcquire.dstStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && bufferAcquire.dstAccessMask
+                    == vk::AccessFlagBits2::eShaderRead
+                && bufferAcquire.srcQueueFamilyIndex == 3
+                && bufferAcquire.dstQueueFamilyIndex == 5
+                && bufferSameFamily.srcStageMask
+                    == vk::PipelineStageFlagBits2::eTransfer
+                && bufferSameFamily.srcAccessMask
+                    == vk::AccessFlagBits2::eTransferWrite
+                && bufferSameFamily.dstStageMask
+                    == vk::PipelineStageFlagBits2::eFragmentShader
+                && bufferSameFamily.dstAccessMask
+                    == vk::AccessFlagBits2::eShaderRead
+                && bufferSameFamily.srcQueueFamilyIndex
+                    == VK_QUEUE_FAMILY_IGNORED
+                && bufferSameFamily.dstQueueFamilyIndex
+                    == VK_QUEUE_FAMILY_IGNORED
+                && nvrhi::vulkan::detail::queueOwnershipDependencyFlags(
+                    false, true) == maintenance8OwnershipFlag
+                && !nvrhi::vulkan::detail::queueOwnershipDependencyFlags(
+                    false, false)
+                && !nvrhi::vulkan::detail::queueOwnershipDependencyFlags(
+                    true, true);
+        }
+
         passed &= mappingPassed;
         if (!mappingPassed)
             std::cerr << "Stage-qualified Vulkan state mapping test failed\n";
@@ -613,6 +819,28 @@ int main()
                 nvrhi::ResourceStates::ShaderResource,
                 nvrhi::ShaderType::Pixel);
             trackerPassed &= tracker.getBufferBarriers().empty();
+            const nvrhi::ShaderType outstandingStages =
+                tracker.getBufferShaderStages(&trackerBuffer);
+            const auto ownershipReleaseSource =
+                nvrhi::vulkan::convertResourceState(
+                    nvrhi::ResourceStates::ShaderResource,
+                    false, false, false,
+                    nvrhi::ShaderType::Compute | outstandingStages);
+            const auto ownershipReleaseDestination =
+                nvrhi::vulkan::convertResourceState(
+                    nvrhi::ResourceStates::ShaderResource,
+                    false, false, false, nvrhi::ShaderType::Compute);
+            const auto ownershipRelease =
+                nvrhi::vulkan::detail::buildQueueOwnershipBufferBarrier(
+                    {}, trackerBufferDesc.byteSize,
+                    ownershipReleaseSource, ownershipReleaseDestination,
+                    3, 5, true, false);
+            trackerPassed &= outstandingStages
+                    == stageUnion(nvrhi::ShaderType::Compute,
+                        nvrhi::ShaderType::Pixel)
+                && ownershipRelease.srcStageMask
+                    == (vk::PipelineStageFlagBits2::eComputeShader
+                        | vk::PipelineStageFlagBits2::eFragmentShader);
             tracker.requireBufferState(
                 &trackerBuffer,
                 nvrhi::ResourceStates::UnorderedAccess,
@@ -752,7 +980,14 @@ int main()
                 &trackerTexture, mip0,
                 nvrhi::ResourceStates::ShaderResource,
                 nvrhi::ShaderType::Pixel);
-            trackerPassed &= tracker.getTextureBarriers().empty();
+            trackerPassed &= tracker.getTextureBarriers().empty()
+                && tracker.getTextureSubresourceShaderStages(
+                    &trackerTexture, 0, 0)
+                    == stageUnion(nvrhi::ShaderType::Compute,
+                        nvrhi::ShaderType::Pixel)
+                && tracker.getTextureSubresourceShaderStages(
+                    &trackerTexture, 0, 1)
+                    == nvrhi::ShaderType::Compute;
             tracker.requireTextureState(
                 &trackerTexture, mip0,
                 nvrhi::ResourceStates::UnorderedAccess,
@@ -771,6 +1006,34 @@ int main()
                 && barriers[1].mipLevel == 1
                 && barriers[1].shaderStagesBefore == nvrhi::ShaderType::Compute
                 && barriers[1].shaderStagesAfter == nvrhi::ShaderType::Pixel;
+        }
+
+        // A permanent transition is pending from recording until successful
+        // submission. QFOT validation must be able to reject that state before
+        // the resource-level permanentState field is committed.
+        {
+            nvrhi::CommandListResourceStateTracker tracker(&messageCallback);
+            tracker.beginTrackingBufferState(
+                &trackerBuffer, nvrhi::ResourceStates::Common);
+            tracker.setPermanentBufferState(
+                &trackerBuffer, nvrhi::ResourceStates::CopyDest);
+            trackerPassed &= tracker.hasPendingPermanentBufferState(
+                &trackerBuffer);
+
+            nvrhi::TextureDesc permanentTextureDesc {};
+            permanentTextureDesc.width = 4;
+            permanentTextureDesc.height = 4;
+            permanentTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+            nvrhi::TextureStateExtension permanentTexture(
+                permanentTextureDesc);
+            tracker.beginTrackingTextureState(
+                &permanentTexture, nvrhi::AllSubresources,
+                nvrhi::ResourceStates::Common);
+            tracker.setPermanentTextureState(
+                &permanentTexture, nvrhi::AllSubresources,
+                nvrhi::ResourceStates::CopyDest);
+            trackerPassed &= tracker.hasPendingPermanentTextureState(
+                &permanentTexture);
         }
 
         // Pending per-subresource transitions widen only the subresource that
@@ -1753,6 +2016,495 @@ int main()
         passed &= computeReuseId > copyReuseId;
         passed &= waitTimeline(vkDevice, uploadReuseTimeline, uploadReuseValue2);
         previousId = computeReuseId;
+    }
+
+    // Public QFOT smoke test. This test device aliases every logical queue to
+    // one Vulkan family, so release performs the ordinary state transition
+    // and acquire only seeds the destination command list. The timeline wait
+    // remains explicit because submission ordering is outside the QFOT API.
+    {
+        nvrhi::BufferDesc ownershipBufferDesc {};
+        ownershipBufferDesc.byteSize = sizeof(expectedWords);
+        ownershipBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        ownershipBufferDesc.keepInitialState = false;
+        ownershipBufferDesc.sharedAcrossQueues = false;
+        ownershipBufferDesc.debugName = "QueueOwnershipTransferBuffer";
+        nvrhi::BufferHandle ownershipBuffer =
+            device->createBuffer(ownershipBufferDesc);
+        VkSemaphore ownershipTimeline = timeline();
+
+        nvrhi::vulkan::QueueOwnershipTransferDesc transfer {};
+        transfer.setSourceQueue(nvrhi::CommandQueue::Copy)
+            .setDestinationQueue(nvrhi::CommandQueue::Graphics)
+            .setStateBefore(nvrhi::ResourceStates::CopyDest)
+            .setStateAfter(nvrhi::ResourceStates::CopySource)
+            .setShaderStagesBefore(nvrhi::ShaderType::None)
+            .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+        passed &= bool(ownershipBuffer) && ownershipTimeline != VK_NULL_HANDLE;
+        passed &= device->supportsEfficientQueueOwnershipTransfer(
+                nvrhi::CommandQueue::Copy, nvrhi::CommandQueue::Graphics)
+            && !device->supportsEfficientQueueOwnershipTransfer(
+                nvrhi::CommandQueue::Copy, nvrhi::CommandQueue::Copy)
+            && !device->supportsEfficientQueueOwnershipTransfer(
+                nvrhi::CommandQueue::Count, nvrhi::CommandQueue::Graphics);
+        if (ownershipBuffer && ownershipTimeline
+            && copyCommandList && graphicsCommandList && readback)
+        {
+            copyCommandList->open();
+            copyCommandList->beginTrackingBufferState(
+                ownershipBuffer, nvrhi::ResourceStates::Common);
+            copyCommandList->writeBuffer(
+                ownershipBuffer, expectedWords.data(), sizeof(expectedWords));
+            const bool released = device->releaseBufferQueueOwnership(
+                copyCommandList, ownershipBuffer, transfer);
+            copyCommandList->close();
+            passed &= released;
+
+            nvrhi::ICommandList* copyPtr = copyCommandList.Get();
+            const uint64_t ownershipReleaseValue = 1;
+            nvrhi::vulkan::SubmitSyncExtras releaseExtras {};
+            releaseExtras.signalSemaphores = &ownershipTimeline;
+            releaseExtras.signalValues = &ownershipReleaseValue;
+            releaseExtras.numSignals = 1;
+            device->executeCommandListsWithSyncIsolated(
+                &copyPtr, 1, nvrhi::CommandQueue::Copy, releaseExtras);
+
+            graphicsCommandList->open();
+            const bool acquired = device->acquireBufferQueueOwnership(
+                graphicsCommandList, ownershipBuffer, transfer);
+            graphicsCommandList->copyBuffer(
+                readback, 0, ownershipBuffer, 0, sizeof(expectedWords));
+            graphicsCommandList->close();
+            passed &= acquired;
+
+            nvrhi::ICommandList* graphicsPtr = graphicsCommandList.Get();
+            const uint64_t ownershipAcquireValue = 2;
+            const VkPipelineStageFlags2 ownershipWaitStage =
+                VK_PIPELINE_STAGE_2_COPY_BIT;
+            nvrhi::vulkan::SubmitSyncExtras acquireExtras {};
+            acquireExtras.waitSemaphores = &ownershipTimeline;
+            acquireExtras.waitValues = &ownershipReleaseValue;
+            acquireExtras.numWaits = 1;
+            acquireExtras.waitStageMasks = &ownershipWaitStage;
+            acquireExtras.signalSemaphores = &ownershipTimeline;
+            acquireExtras.signalValues = &ownershipAcquireValue;
+            acquireExtras.numSignals = 1;
+            device->executeCommandListsWithSyncIsolated(
+                &graphicsPtr, 1, nvrhi::CommandQueue::Graphics,
+                acquireExtras);
+
+            passed &= waitTimeline(
+                vkDevice, ownershipTimeline, ownershipAcquireValue);
+            void* mapped = device->mapBuffer(
+                readback, nvrhi::CpuAccessMode::Read);
+            passed &= mapped != nullptr;
+            if (mapped)
+            {
+                passed &= std::memcmp(
+                    mapped, expectedWords.data(), sizeof(expectedWords)) == 0;
+                device->unmapBuffer(readback);
+            }
+        }
+    }
+
+    // Invalid QFOT requests must fail before recording a Vulkan ownership
+    // barrier. Cover the two state-lifetime directions and resolved range
+    // validation that are easy to regress while the public API evolves.
+    {
+        const uint32_t errorsBeforeRejections = messageCallback.errors;
+        nvrhi::vulkan::QueueOwnershipTransferDesc transfer {};
+        transfer.setSourceQueue(nvrhi::CommandQueue::Copy)
+            .setDestinationQueue(nvrhi::CommandQueue::Graphics)
+            .setStateBefore(nvrhi::ResourceStates::CopyDest)
+            .setStateAfter(nvrhi::ResourceStates::CopySource)
+            .setShaderStagesBefore(nvrhi::ShaderType::None)
+            .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+        nvrhi::BufferDesc permanentBufferDesc {};
+        permanentBufferDesc.byteSize = 64;
+        permanentBufferDesc.keepInitialState = false;
+        permanentBufferDesc.sharedAcrossQueues = false;
+        permanentBufferDesc.debugName = "PendingPermanentQfotBuffer";
+        nvrhi::BufferHandle permanentBuffer =
+            device->createBuffer(permanentBufferDesc);
+        nvrhi::CommandListHandle permanentBufferList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Copy));
+        passed &= bool(permanentBuffer) && bool(permanentBufferList);
+        if (permanentBuffer && permanentBufferList)
+        {
+            permanentBufferList->open();
+            permanentBufferList->beginTrackingBufferState(
+                permanentBuffer, nvrhi::ResourceStates::Common);
+            permanentBufferList->setPermanentBufferState(
+                permanentBuffer, nvrhi::ResourceStates::CopyDest);
+            passed &= !device->releaseBufferQueueOwnership(
+                permanentBufferList, permanentBuffer, transfer);
+            permanentBufferList->close();
+            nvrhi::ICommandList* permanentBufferListPtr =
+                permanentBufferList.Get();
+            passed &= device->executeCommandListsWithSyncIsolated(
+                &permanentBufferListPtr, 1, nvrhi::CommandQueue::Copy,
+                emptyExtras) != 0;
+        }
+
+        nvrhi::TextureDesc permanentTextureDesc {};
+        permanentTextureDesc.width = 4;
+        permanentTextureDesc.height = 4;
+        permanentTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        permanentTextureDesc.keepInitialState = false;
+        permanentTextureDesc.sharedAcrossQueues = false;
+        permanentTextureDesc.debugName = "PendingPermanentQfotTexture";
+        nvrhi::TextureHandle permanentTexture =
+            device->createTexture(permanentTextureDesc);
+        nvrhi::CommandListHandle permanentTextureList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Copy));
+        passed &= bool(permanentTexture) && bool(permanentTextureList);
+        if (permanentTexture && permanentTextureList)
+        {
+            permanentTextureList->open();
+            permanentTextureList->beginTrackingTextureState(
+                permanentTexture, nvrhi::AllSubresources,
+                nvrhi::ResourceStates::Common);
+            permanentTextureList->setPermanentTextureState(
+                permanentTexture, nvrhi::ResourceStates::CopyDest);
+            passed &= !device->releaseTextureQueueOwnership(
+                permanentTextureList, permanentTexture,
+                nvrhi::AllSubresources, transfer);
+            permanentTextureList->close();
+            nvrhi::ICommandList* permanentTextureListPtr =
+                permanentTextureList.Get();
+            passed &= device->executeCommandListsWithSyncIsolated(
+                &permanentTextureListPtr, 1, nvrhi::CommandQueue::Copy,
+                emptyExtras) != 0;
+        }
+
+        nvrhi::TextureDesc invalidRangeTextureDesc = permanentTextureDesc;
+        invalidRangeTextureDesc.debugName = "InvalidRangeQfotTexture";
+        nvrhi::TextureHandle invalidRangeTexture =
+            device->createTexture(invalidRangeTextureDesc);
+        nvrhi::CommandListHandle invalidRangeList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Graphics));
+        passed &= bool(invalidRangeTexture) && bool(invalidRangeList);
+        if (invalidRangeTexture && invalidRangeList)
+        {
+            invalidRangeList->open();
+            const nvrhi::TextureSubresourceSet outOfRange(
+                invalidRangeTextureDesc.mipLevels, 1, 0, 1);
+            passed &= !device->acquireTextureQueueOwnership(
+                invalidRangeList, invalidRangeTexture,
+                outOfRange, transfer);
+            invalidRangeList->close();
+            nvrhi::ICommandList* invalidRangeListPtr =
+                invalidRangeList.Get();
+            passed &= device->executeCommandListsWithSyncIsolated(
+                &invalidRangeListPtr, 1, nvrhi::CommandQueue::Graphics,
+                emptyExtras) != 0;
+        }
+
+        passed &= messageCallback.errors == errorsBeforeRejections + 3;
+        messageCallback.errors = errorsBeforeRejections;
+    }
+
+    // When the driver exposes both maintenance8 and a distinct transfer
+    // family, run the real release/semaphore/acquire sequence under SyncVal.
+    // Hardware with only one usable family retains the mandatory same-family
+    // smoke test above and skips this optional portability-dependent case.
+    if (supportsMaintenance8 && distinctTransferQueue != VK_NULL_HANDLE)
+    {
+        nvrhi::vulkan::DeviceDesc ownershipDeviceDesc {};
+        ownershipDeviceDesc.errorCB = &messageCallback;
+        ownershipDeviceDesc.instance = instance;
+        ownershipDeviceDesc.physicalDevice = physicalDevice;
+        ownershipDeviceDesc.device = vkDevice;
+        ownershipDeviceDesc.graphicsQueue = queue;
+        ownershipDeviceDesc.graphicsQueueIndex = int(queueFamilyIndex);
+        ownershipDeviceDesc.computeQueue = queue;
+        ownershipDeviceDesc.computeQueueIndex = int(queueFamilyIndex);
+        ownershipDeviceDesc.transferQueue = distinctTransferQueue;
+        ownershipDeviceDesc.transferQueueIndex =
+            int(distinctTransferQueueFamilyIndex);
+        ownershipDeviceDesc.deviceExtensions = deviceExtensions.data();
+        ownershipDeviceDesc.numDeviceExtensions = 1;
+        ownershipDeviceDesc.maintenance8Supported = true;
+        nvrhi::vulkan::DeviceHandle ownershipDevice =
+            nvrhi::vulkan::createDevice(ownershipDeviceDesc);
+        passed &= bool(ownershipDevice);
+
+        if (ownershipDevice)
+        {
+            nvrhi::BufferDesc sourceDesc {};
+            sourceDesc.byteSize = sizeof(expectedWords);
+            sourceDesc.initialState = nvrhi::ResourceStates::Common;
+            sourceDesc.keepInitialState = false;
+            sourceDesc.sharedAcrossQueues = false;
+            sourceDesc.debugName = "DistinctFamilyOwnershipSource";
+            nvrhi::BufferHandle source =
+                ownershipDevice->createBuffer(sourceDesc);
+
+            nvrhi::BufferDesc ownershipReadbackDesc {};
+            ownershipReadbackDesc.byteSize = sizeof(expectedWords);
+            ownershipReadbackDesc.cpuAccess = nvrhi::CpuAccessMode::Read;
+            ownershipReadbackDesc.initialState =
+                nvrhi::ResourceStates::CopyDest;
+            ownershipReadbackDesc.keepInitialState = true;
+            ownershipReadbackDesc.sharedAcrossQueues = false;
+            ownershipReadbackDesc.debugName =
+                "DistinctFamilyOwnershipReadback";
+            nvrhi::BufferHandle ownershipReadback =
+                ownershipDevice->createBuffer(ownershipReadbackDesc);
+
+            nvrhi::CommandListHandle ownershipReleaseList =
+                ownershipDevice->createCommandList(
+                    nvrhi::CommandListParameters().setQueueType(
+                        nvrhi::CommandQueue::Copy));
+            nvrhi::CommandListHandle ownershipAcquireList =
+                ownershipDevice->createCommandList(
+                    nvrhi::CommandListParameters().setQueueType(
+                        nvrhi::CommandQueue::Graphics));
+            VkSemaphore distinctOwnershipTimeline = timeline();
+
+            passed &= bool(source) && bool(ownershipReadback)
+                && bool(ownershipReleaseList) && bool(ownershipAcquireList)
+                && distinctOwnershipTimeline != VK_NULL_HANDLE
+                && ownershipDevice->getQueueFamilyIndex(
+                    nvrhi::CommandQueue::Copy)
+                    == distinctTransferQueueFamilyIndex
+                && ownershipDevice->getQueueFamilyIndex(
+                    nvrhi::CommandQueue::Graphics) == queueFamilyIndex
+                && ownershipDevice->supportsEfficientQueueOwnershipTransfer(
+                    nvrhi::CommandQueue::Copy,
+                    nvrhi::CommandQueue::Graphics);
+
+            if (source && ownershipReadback && ownershipReleaseList
+                && ownershipAcquireList && distinctOwnershipTimeline)
+            {
+                nvrhi::vulkan::QueueOwnershipTransferDesc transfer {};
+                transfer.setSourceQueue(nvrhi::CommandQueue::Copy)
+                    .setDestinationQueue(nvrhi::CommandQueue::Graphics)
+                    .setStateBefore(nvrhi::ResourceStates::CopyDest)
+                    .setStateAfter(nvrhi::ResourceStates::CopySource)
+                    .setShaderStagesBefore(nvrhi::ShaderType::None)
+                    .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+                ownershipReleaseList->open();
+                ownershipReleaseList->beginTrackingBufferState(
+                    source, nvrhi::ResourceStates::Common);
+                ownershipReleaseList->writeBuffer(
+                    source, expectedWords.data(), sizeof(expectedWords));
+                const bool released =
+                    ownershipDevice->releaseBufferQueueOwnership(
+                        ownershipReleaseList, source, transfer);
+                ownershipReleaseList->close();
+                passed &= released;
+
+                nvrhi::ICommandList* releasePtr = ownershipReleaseList.Get();
+                const uint64_t releaseValue = 1;
+                nvrhi::vulkan::SubmitSyncExtras releaseExtras {};
+                releaseExtras.signalSemaphores =
+                    &distinctOwnershipTimeline;
+                releaseExtras.signalValues = &releaseValue;
+                releaseExtras.numSignals = 1;
+                ownershipDevice->executeCommandListsWithSyncIsolated(
+                    &releasePtr, 1, nvrhi::CommandQueue::Copy,
+                    releaseExtras);
+
+                ownershipAcquireList->open();
+                const bool acquired =
+                    ownershipDevice->acquireBufferQueueOwnership(
+                        ownershipAcquireList, source, transfer);
+                ownershipAcquireList->copyBuffer(
+                    ownershipReadback, 0, source, 0,
+                    sizeof(expectedWords));
+                ownershipAcquireList->close();
+                passed &= acquired;
+
+                nvrhi::ICommandList* acquirePtr = ownershipAcquireList.Get();
+                const uint64_t acquireValue = 2;
+                const VkPipelineStageFlags2 waitStage =
+                    VK_PIPELINE_STAGE_2_COPY_BIT;
+                nvrhi::vulkan::SubmitSyncExtras acquireExtras {};
+                acquireExtras.waitSemaphores =
+                    &distinctOwnershipTimeline;
+                acquireExtras.waitValues = &releaseValue;
+                acquireExtras.numWaits = 1;
+                acquireExtras.waitStageMasks = &waitStage;
+                acquireExtras.signalSemaphores =
+                    &distinctOwnershipTimeline;
+                acquireExtras.signalValues = &acquireValue;
+                acquireExtras.numSignals = 1;
+                ownershipDevice->executeCommandListsWithSyncIsolated(
+                    &acquirePtr, 1, nvrhi::CommandQueue::Graphics,
+                    acquireExtras);
+
+                passed &= waitTimeline(
+                    vkDevice, distinctOwnershipTimeline, acquireValue);
+                void* mapped = ownershipDevice->mapBuffer(
+                    ownershipReadback, nvrhi::CpuAccessMode::Read);
+                passed &= mapped != nullptr;
+                if (mapped)
+                {
+                    passed &= std::memcmp(
+                        mapped, expectedWords.data(),
+                        sizeof(expectedWords)) == 0;
+                    ownershipDevice->unmapBuffer(ownershipReadback);
+                }
+            }
+
+            // Repeat the handoff for an image so SyncVal also observes the
+            // matched queue-family indices and TransferDst -> TransferSrc
+            // layout transition on both halves of the ownership operation.
+            {
+                nvrhi::TextureDesc ownershipTextureDesc {};
+                ownershipTextureDesc.width = uint32_t(expectedWords.size());
+                ownershipTextureDesc.height = 1;
+                ownershipTextureDesc.format = nvrhi::Format::R32_UINT;
+                ownershipTextureDesc.initialState =
+                    nvrhi::ResourceStates::Common;
+                ownershipTextureDesc.keepInitialState = false;
+                ownershipTextureDesc.sharedAcrossQueues = false;
+                ownershipTextureDesc.debugName =
+                    "DistinctFamilyOwnershipTexture";
+                nvrhi::TextureHandle ownershipTexture =
+                    ownershipDevice->createTexture(ownershipTextureDesc);
+
+                ownershipTextureDesc.debugName =
+                    "DistinctFamilyOwnershipTextureUpload";
+                nvrhi::StagingTextureHandle ownershipTextureUpload =
+                    ownershipDevice->createStagingTexture(
+                        ownershipTextureDesc,
+                        nvrhi::CpuAccessMode::Write);
+                ownershipTextureDesc.debugName =
+                    "DistinctFamilyOwnershipTextureReadback";
+                nvrhi::StagingTextureHandle ownershipTextureReadback =
+                    ownershipDevice->createStagingTexture(
+                        ownershipTextureDesc,
+                        nvrhi::CpuAccessMode::Read);
+                const nvrhi::TextureSlice wholeTexture {};
+                size_t uploadRowPitch = 0;
+                void* uploadData = ownershipDevice->mapStagingTexture(
+                    ownershipTextureUpload, wholeTexture,
+                    nvrhi::CpuAccessMode::Write, &uploadRowPitch);
+
+                passed &= bool(ownershipTexture)
+                    && bool(ownershipTextureUpload)
+                    && bool(ownershipTextureReadback)
+                    && uploadData != nullptr
+                    && uploadRowPitch >= sizeof(expectedWords);
+                if (uploadData)
+                {
+                    std::memcpy(
+                        uploadData, expectedWords.data(),
+                        sizeof(expectedWords));
+                    ownershipDevice->unmapStagingTexture(
+                        ownershipTextureUpload);
+                }
+
+                if (ownershipTexture && ownershipTextureUpload
+                    && ownershipTextureReadback && uploadData
+                    && ownershipReleaseList && ownershipAcquireList
+                    && distinctOwnershipTimeline)
+                {
+                    nvrhi::vulkan::QueueOwnershipTransferDesc transfer {};
+                    transfer.setSourceQueue(nvrhi::CommandQueue::Copy)
+                        .setDestinationQueue(nvrhi::CommandQueue::Graphics)
+                        .setStateBefore(nvrhi::ResourceStates::CopyDest)
+                        .setStateAfter(nvrhi::ResourceStates::CopySource)
+                        .setShaderStagesBefore(nvrhi::ShaderType::None)
+                        .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+                    ownershipReleaseList->open();
+                    ownershipReleaseList->beginTrackingTextureState(
+                        ownershipTexture, nvrhi::AllSubresources,
+                        nvrhi::ResourceStates::Common);
+                    ownershipReleaseList->copyTexture(
+                        ownershipTexture, wholeTexture,
+                        ownershipTextureUpload, wholeTexture);
+                    const bool released =
+                        ownershipDevice->releaseTextureQueueOwnership(
+                            ownershipReleaseList, ownershipTexture,
+                            nvrhi::AllSubresources, transfer);
+                    ownershipReleaseList->close();
+                    passed &= released;
+
+                    nvrhi::ICommandList* releasePtr =
+                        ownershipReleaseList.Get();
+                    const uint64_t releaseValue = 3;
+                    nvrhi::vulkan::SubmitSyncExtras releaseExtras {};
+                    releaseExtras.signalSemaphores =
+                        &distinctOwnershipTimeline;
+                    releaseExtras.signalValues = &releaseValue;
+                    releaseExtras.numSignals = 1;
+                    ownershipDevice->executeCommandListsWithSyncIsolated(
+                        &releasePtr, 1, nvrhi::CommandQueue::Copy,
+                        releaseExtras);
+
+                    ownershipAcquireList->open();
+                    const bool acquired =
+                        ownershipDevice->acquireTextureQueueOwnership(
+                            ownershipAcquireList, ownershipTexture,
+                            nvrhi::AllSubresources, transfer);
+                    ownershipAcquireList->copyTexture(
+                        ownershipTextureReadback, wholeTexture,
+                        ownershipTexture, wholeTexture);
+                    ownershipAcquireList->close();
+                    passed &= acquired;
+
+                    nvrhi::ICommandList* acquirePtr =
+                        ownershipAcquireList.Get();
+                    const uint64_t acquireValue = 4;
+                    const VkPipelineStageFlags2 waitStage =
+                        VK_PIPELINE_STAGE_2_COPY_BIT;
+                    nvrhi::vulkan::SubmitSyncExtras acquireExtras {};
+                    acquireExtras.waitSemaphores =
+                        &distinctOwnershipTimeline;
+                    acquireExtras.waitValues = &releaseValue;
+                    acquireExtras.numWaits = 1;
+                    acquireExtras.waitStageMasks = &waitStage;
+                    acquireExtras.signalSemaphores =
+                        &distinctOwnershipTimeline;
+                    acquireExtras.signalValues = &acquireValue;
+                    acquireExtras.numSignals = 1;
+                    ownershipDevice->executeCommandListsWithSyncIsolated(
+                        &acquirePtr, 1, nvrhi::CommandQueue::Graphics,
+                        acquireExtras);
+
+                    passed &= waitTimeline(
+                        vkDevice, distinctOwnershipTimeline, acquireValue);
+                    size_t readbackRowPitch = 0;
+                    void* readbackData =
+                        ownershipDevice->mapStagingTexture(
+                            ownershipTextureReadback, wholeTexture,
+                            nvrhi::CpuAccessMode::Read,
+                            &readbackRowPitch);
+                    passed &= readbackData != nullptr
+                        && readbackRowPitch >= sizeof(expectedWords);
+                    if (readbackData)
+                    {
+                        passed &= std::memcmp(
+                            readbackData, expectedWords.data(),
+                            sizeof(expectedWords)) == 0;
+                        ownershipDevice->unmapStagingTexture(
+                            ownershipTextureReadback);
+                    }
+                }
+            }
+
+            ownershipReleaseList = nullptr;
+            ownershipAcquireList = nullptr;
+            source = nullptr;
+            ownershipReadback = nullptr;
+            passed &= ownershipDevice->waitForIdle();
+            ownershipDevice->runGarbageCollection();
+            ownershipDevice->runGarbageCollection();
+        }
+        ownershipDevice = nullptr;
     }
 
     // Exercise every transfer direction used by streaming textures while the

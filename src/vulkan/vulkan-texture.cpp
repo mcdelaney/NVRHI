@@ -343,6 +343,10 @@ namespace nvrhi::vulkan
                 .setQueueFamilyIndexCount(static_cast<uint32_t>(m_ConcurrentQueueFamilyIndices.size()))
                 .setPQueueFamilyIndices(m_ConcurrentQueueFamilyIndices.data());
         }
+        texture->queueSharingMode = texture->imageInfo.sharingMode
+                == vk::SharingMode::eConcurrent
+            ? QueueSharingMode::Concurrent
+            : QueueSharingMode::Exclusive;
 
         vk::Result res = m_Context.device.createImage(&texture->imageInfo, m_Context.allocationCallbacks, &texture->image);
         ASSERT_VK_OK(res);
@@ -828,6 +832,7 @@ namespace nvrhi::vulkan
 
         texture->image = image;
         texture->managed = false;
+        texture->queueSharingMode = QueueSharingMode::UnknownNative;
 
         return TextureHandle::Create(texture);
     }
