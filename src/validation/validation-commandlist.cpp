@@ -1089,12 +1089,36 @@ namespace nvrhi::validation
         m_CommandList->beginTrackingTextureState(texture, subresources, stateBits);
     }
 
+    void CommandListWrapper::beginTrackingTextureState(
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
+        if (!requireOpenState())
+            return;
+
+        m_CommandList->beginTrackingTextureState(
+            texture, subresources, stateBits, shaderStages);
+    }
+
     void CommandListWrapper::beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits)
     {
         if (!requireOpenState())
             return;
 
         m_CommandList->beginTrackingBufferState(buffer, stateBits);
+    }
+
+    void CommandListWrapper::beginTrackingBufferState(
+        IBuffer* buffer,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
+        if (!requireOpenState())
+            return;
+
+        m_CommandList->beginTrackingBufferState(buffer, stateBits, shaderStages);
     }
 
     void CommandListWrapper::setTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates stateBits)
@@ -1105,6 +1129,19 @@ namespace nvrhi::validation
         m_CommandList->setTextureState(texture, subresources, stateBits);
     }
 
+    void CommandListWrapper::setTextureState(
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
+        if (!requireOpenState())
+            return;
+
+        m_CommandList->setTextureState(
+            texture, subresources, stateBits, shaderStages);
+    }
+
     void CommandListWrapper::setBufferState(IBuffer* buffer, ResourceStates stateBits)
     {
         if (!requireOpenState())
@@ -1113,12 +1150,37 @@ namespace nvrhi::validation
         m_CommandList->setBufferState(buffer, stateBits);
     }
 
+    void CommandListWrapper::setBufferState(
+        IBuffer* buffer,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
+        if (!requireOpenState())
+            return;
+
+        m_CommandList->setBufferState(buffer, stateBits, shaderStages);
+    }
+
     void CommandListWrapper::setAccelStructState(rt::IAccelStruct* as, ResourceStates stateBits)
     {
         if (!requireOpenState())
             return;
 
         m_CommandList->setAccelStructState(checked_cast<rt::IAccelStruct*>(unwrapResource(as)), stateBits);
+    }
+
+    void CommandListWrapper::setAccelStructState(
+        rt::IAccelStruct* as,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
+        if (!requireOpenState())
+            return;
+
+        m_CommandList->setAccelStructState(
+            checked_cast<rt::IAccelStruct*>(unwrapResource(as)),
+            stateBits,
+            shaderStages);
     }
 
     void CommandListWrapper::setPermanentTextureState(ITexture* texture, ResourceStates stateBits)

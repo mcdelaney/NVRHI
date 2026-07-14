@@ -260,11 +260,21 @@ namespace nvrhi::validation
         void setEnableUavBarriersForBuffer(IBuffer* buffer, bool enableBarriers) override;
 
         void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates stateBits) override;
+        void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages) override;
         void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits) override;
+        void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages) override;
 
         void setTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates stateBits) override;
+        void setTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages) override;
         void setBufferState(IBuffer* buffer, ResourceStates stateBits) override;
+        void setBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages) override;
         void setAccelStructState(rt::IAccelStruct* as, ResourceStates stateBits) override;
+        void setAccelStructState(rt::IAccelStruct* as, ResourceStates stateBits,
+            ShaderType shaderStages) override;
 
         void setPermanentTextureState(ITexture* texture, ResourceStates stateBits) override;
         void setPermanentBufferState(IBuffer* buffer, ResourceStates stateBits) override;

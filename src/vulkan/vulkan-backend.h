@@ -75,11 +75,13 @@ namespace nvrhi::vulkan
     };
 
     vk::SamplerAddressMode convertSamplerAddressMode(SamplerAddressMode mode);
-    vk::PipelineStageFlagBits2 convertShaderTypeToPipelineStageFlagBits(ShaderType shaderType);
+    vk::PipelineStageFlags2 convertShaderTypeToPipelineStageFlags(ShaderType shaderType);
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType);
     ResourceStateMapping convertResourceState(ResourceStates state, bool isImage,
-        bool useGeneralLayout = false, bool isDepthStencil = false);
-    ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc);
+        bool useGeneralLayout = false, bool isDepthStencil = false,
+        ShaderType shaderStages = ShaderType::All);
+    ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc,
+        ShaderType shaderStages = ShaderType::All);
     vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc);
     inline ResourceStates getTextureSrvState(const BindingSetItem& binding)
     {
@@ -1429,11 +1431,21 @@ namespace nvrhi::vulkan
         void setEnableUavBarriersForBuffer(IBuffer* buffer, bool enableBarriers) override;
         
         void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates stateBits) override;
+        void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages) override;
         void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits) override;
+        void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages) override;
 
         void setTextureState(ITexture* texture, TextureSubresourceSet subresources, ResourceStates stateBits) override;
+        void setTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages) override;
         void setBufferState(IBuffer* buffer, ResourceStates stateBits) override;
+        void setBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages) override;
         void setAccelStructState(rt::IAccelStruct* _as, ResourceStates stateBits) override;
+        void setAccelStructState(rt::IAccelStruct* _as, ResourceStates stateBits,
+            ShaderType shaderStages) override;
 
         void setPermanentTextureState(ITexture* texture, ResourceStates stateBits) override;
         void setPermanentBufferState(IBuffer* buffer, ResourceStates stateBits) override;

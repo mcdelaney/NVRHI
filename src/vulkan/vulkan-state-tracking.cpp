@@ -224,9 +224,9 @@ namespace nvrhi::vulkan
             Texture* texture = static_cast<Texture*>(barrier.texture);
 
             ResourceStateMapping before = convertTextureState(
-                barrier.stateBefore, texture->desc);
+                barrier.stateBefore, texture->desc, barrier.shaderStagesBefore);
             ResourceStateMapping after = convertTextureState(
-                barrier.stateAfter, texture->desc);
+                barrier.stateAfter, texture->desc, barrier.shaderStagesAfter);
 
             assert(after.imageLayout != vk::ImageLayout::eUndefined);
 
@@ -269,8 +269,12 @@ namespace nvrhi::vulkan
 
         for (const BufferBarrier& barrier : m_StateTracker.getBufferBarriers())
         {
-            ResourceStateMapping before = convertResourceState(barrier.stateBefore, false);
-            ResourceStateMapping after = convertResourceState(barrier.stateAfter, false);
+            ResourceStateMapping before = convertResourceState(
+                barrier.stateBefore, false, false, false,
+                barrier.shaderStagesBefore);
+            ResourceStateMapping after = convertResourceState(
+                barrier.stateAfter, false, false, false,
+                barrier.shaderStagesAfter);
 
             Buffer* buffer = static_cast<Buffer*>(barrier.buffer);
 
@@ -310,23 +314,52 @@ namespace nvrhi::vulkan
 
     void CommandList::beginTrackingTextureState(ITexture* _texture, TextureSubresourceSet subresources, ResourceStates stateBits)
     {
+        beginTrackingTextureState(
+            _texture, subresources, stateBits, ShaderType::All);
+    }
+
+    void CommandList::beginTrackingTextureState(
+        ITexture* _texture,
+        TextureSubresourceSet subresources,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
         Texture* texture = checked_cast<Texture*>(_texture);
 
-        m_StateTracker.beginTrackingTextureState(texture, subresources, stateBits);
+        m_StateTracker.beginTrackingTextureState(
+            texture, subresources, stateBits, shaderStages);
     }
 
     void CommandList::beginTrackingBufferState(IBuffer* _buffer, ResourceStates stateBits)
     {
+        beginTrackingBufferState(_buffer, stateBits, ShaderType::All);
+    }
+
+    void CommandList::beginTrackingBufferState(
+        IBuffer* _buffer,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
-        m_StateTracker.beginTrackingBufferState(buffer, stateBits);
+        m_StateTracker.beginTrackingBufferState(buffer, stateBits, shaderStages);
     }
 
     void CommandList::setTextureState(ITexture* _texture, TextureSubresourceSet subresources, ResourceStates stateBits)
     {
+        setTextureState(_texture, subresources, stateBits, ShaderType::All);
+    }
+
+    void CommandList::setTextureState(
+        ITexture* _texture,
+        TextureSubresourceSet subresources,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
         Texture* texture = checked_cast<Texture*>(_texture);
 
-        m_StateTracker.requireTextureState(texture, subresources, stateBits);
+        m_StateTracker.requireTextureState(
+            texture, subresources, stateBits, shaderStages);
 
         if (m_CurrentCmdBuf)
             m_CurrentCmdBuf->referencedResources.push_back(texture);
@@ -334,9 +367,17 @@ namespace nvrhi::vulkan
 
     void CommandList::setBufferState(IBuffer* _buffer, ResourceStates stateBits)
     {
+        setBufferState(_buffer, stateBits, ShaderType::All);
+    }
+
+    void CommandList::setBufferState(
+        IBuffer* _buffer,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
-        m_StateTracker.requireBufferState(buffer, stateBits);
+        m_StateTracker.requireBufferState(buffer, stateBits, shaderStages);
         
         if (m_CurrentCmdBuf)
             m_CurrentCmdBuf->referencedResources.push_back(buffer);
@@ -344,12 +385,20 @@ namespace nvrhi::vulkan
     
     void CommandList::setAccelStructState(rt::IAccelStruct* _as, ResourceStates stateBits)
     {
+        setAccelStructState(_as, stateBits, ShaderType::All);
+    }
+
+    void CommandList::setAccelStructState(
+        rt::IAccelStruct* _as,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
+    {
         AccelStruct* as = checked_cast<AccelStruct*>(_as);
 
         if (as->dataBuffer)
         {
             Buffer* buffer = checked_cast<Buffer*>(as->dataBuffer.Get());
-            m_StateTracker.requireBufferState(buffer, stateBits);
+            m_StateTracker.requireBufferState(buffer, stateBits, shaderStages);
 
             if (m_CurrentCmdBuf)
                 m_CurrentCmdBuf->referencedResources.push_back(as);

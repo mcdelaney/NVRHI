@@ -6,7 +6,8 @@ target_link_libraries(nvrhi_vk_submit_sync_test PRIVATE
     ${nvrhi_vulkan_target}
     Vulkan::Vulkan)
 target_include_directories(nvrhi_vk_submit_sync_test PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/vulkan)
+    ${PROJECT_SOURCE_DIR}/src/vulkan
+    ${PROJECT_SOURCE_DIR}/src/common)
 
 if (MSVC)
     target_compile_definitions(nvrhi_vk_submit_sync_test PRIVATE NOMINMAX)

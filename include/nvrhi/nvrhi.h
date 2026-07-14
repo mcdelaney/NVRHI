@@ -3687,9 +3687,27 @@ namespace nvrhi
         virtual void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources,
             ResourceStates stateBits) = 0;
 
+        // Stage-qualified variant for graph-managed state handoff. Backends
+        // that do not implement stage-aware tracking retain the conservative
+        // behavior of the legacy overload.
+        virtual void beginTrackingTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages)
+        {
+            (void)shaderStages;
+            beginTrackingTextureState(texture, subresources, stateBits);
+        }
+
         // Informs the command list state tracker of the current state of a buffer.
         // See the comment to beginTrackingTextureState(...) for more information.
         virtual void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits) = 0;
+
+        // See the stage-qualified texture tracking overload above.
+        virtual void beginTrackingBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages)
+        {
+            (void)shaderStages;
+            beginTrackingBufferState(buffer, stateBits);
+        }
 
         // Places the necessary barriers to make sure that the texture or some of its subresources are in the given
         // state. If the texture or subresources are already in that state, no action is performed.
@@ -3702,15 +3720,44 @@ namespace nvrhi
         virtual void setTextureState(ITexture* texture, TextureSubresourceSet subresources,
             ResourceStates stateBits) = 0;
 
+        // Places the same logical transition as the legacy overload while
+        // restricting shader-visible portions of the dependency to the
+        // declared consuming stages. ShaderType::All preserves the legacy
+        // conservative scope. Non-shader states ignore shaderStages.
+        virtual void setTextureState(ITexture* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages)
+        {
+            (void)shaderStages;
+            setTextureState(texture, subresources, stateBits);
+        }
+
         // Places the necessary barriers to make sure that the buffer is in the given state.
         // See the comment to setTextureState(...) for more information.
         // Has no effect on DX11.
         virtual void setBufferState(IBuffer* buffer, ResourceStates stateBits) = 0;
 
+        // See the stage-qualified texture state overload above.
+        virtual void setBufferState(IBuffer* buffer, ResourceStates stateBits,
+            ShaderType shaderStages)
+        {
+            (void)shaderStages;
+            setBufferState(buffer, stateBits);
+        }
+
         // Places the necessary barriers to make sure that the underlying buffer for the acceleration structure is
         // in the given state. See the comment to setTextureState(...) for more information.
         // Has no effect on DX11.
         virtual void setAccelStructState(rt::IAccelStruct* as, ResourceStates stateBits) = 0;
+
+        // Stage-qualified acceleration-structure reads support inline ray
+        // queries from compute or graphics shaders. Non-shader AS states
+        // ignore shaderStages.
+        virtual void setAccelStructState(rt::IAccelStruct* as, ResourceStates stateBits,
+            ShaderType shaderStages)
+        {
+            (void)shaderStages;
+            setAccelStructState(as, stateBits);
+        }
 
         // Places the necessary barriers to make sure that the entire texture is in the given state, and marks that
         // state as the texture's permanent state. Once a texture is transitioned into a permanent state, its state

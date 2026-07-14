@@ -53,7 +53,9 @@ namespace nvrhi
     struct TextureState
     {
         std::vector<ResourceStates> subresourceStates;
+        std::vector<ShaderType> subresourceShaderStages;
         ResourceStates state = ResourceStates::Unknown;
+        ShaderType shaderStages = ShaderType::None;
         bool enableUavBarriers = true;
         bool firstUavBarrierPlaced = false;
         bool permanentTransition = false;
@@ -62,6 +64,7 @@ namespace nvrhi
     struct BufferState
     {
         ResourceStates state = ResourceStates::Unknown;
+        ShaderType shaderStages = ShaderType::None;
         bool enableUavBarriers = true;
         bool firstUavBarrierPlaced = false;
         bool permanentTransition = false;
@@ -75,6 +78,8 @@ namespace nvrhi
         bool entireTexture = false;
         ResourceStates stateBefore = ResourceStates::Unknown;
         ResourceStates stateAfter = ResourceStates::Unknown;
+        ShaderType shaderStagesBefore = ShaderType::None;
+        ShaderType shaderStagesAfter = ShaderType::None;
     };
 
     struct BufferBarrier
@@ -82,6 +87,8 @@ namespace nvrhi
         BufferStateExtension* buffer = nullptr;
         ResourceStates stateBefore = ResourceStates::Unknown;
         ResourceStates stateAfter = ResourceStates::Unknown;
+        ShaderType shaderStagesBefore = ShaderType::None;
+        ShaderType shaderStagesAfter = ShaderType::None;
     };
 
     class CommandListResourceStateTracker
@@ -96,8 +103,10 @@ namespace nvrhi
         void setEnableUavBarriersForTexture(TextureStateExtension* texture, bool enableBarriers);
         void setEnableUavBarriersForBuffer(BufferStateExtension* buffer, bool enableBarriers);
 
-        void beginTrackingTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates stateBits);
-        void beginTrackingBufferState(BufferStateExtension* buffer, ResourceStates stateBits);
+        void beginTrackingTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources,
+            ResourceStates stateBits, ShaderType shaderStages = ShaderType::All);
+        void beginTrackingBufferState(BufferStateExtension* buffer, ResourceStates stateBits,
+            ShaderType shaderStages = ShaderType::All);
 
         void setPermanentTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates stateBits);
         void setPermanentBufferState(BufferStateExtension* buffer, ResourceStates stateBits);
@@ -107,8 +116,10 @@ namespace nvrhi
 
         // Internal interface
         
-        void requireTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates state);
-        void requireBufferState(BufferStateExtension* buffer, ResourceStates state);
+        void requireTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources,
+            ResourceStates state, ShaderType shaderStages = ShaderType::All);
+        void requireBufferState(BufferStateExtension* buffer, ResourceStates state,
+            ShaderType shaderStages = ShaderType::All);
 
         void keepBufferInitialStates();
         void keepTextureInitialStates();

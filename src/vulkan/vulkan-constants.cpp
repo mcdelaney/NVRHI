@@ -143,10 +143,13 @@ namespace nvrhi::vulkan
         }
     }
 
-    vk::PipelineStageFlagBits2 convertShaderTypeToPipelineStageFlagBits(ShaderType shaderType)
+    vk::PipelineStageFlags2 convertShaderTypeToPipelineStageFlags(ShaderType shaderType)
     {
         if (shaderType == ShaderType::All)
             return vk::PipelineStageFlagBits2::eAllCommands;
+
+        if (shaderType == ShaderType::AllGraphics)
+            return vk::PipelineStageFlagBits2::eAllGraphics;
 
         uint32_t result = 0;
 
@@ -160,7 +163,7 @@ namespace nvrhi::vulkan
         if ((shaderType & ShaderType::Mesh) != 0)           result |= uint32_t(vk::PipelineStageFlagBits2::eMeshShaderNV);
         if ((shaderType & ShaderType::AllRayTracing) != 0)  result |= uint32_t(vk::PipelineStageFlagBits2::eRayTracingShaderKHR); // or eRayTracingShaderNV, they have the same value
 
-        return vk::PipelineStageFlagBits2(result);
+        return vk::PipelineStageFlags2(result);
     }
 
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType)
@@ -318,7 +321,7 @@ namespace nvrhi::vulkan
     };
 
     ResourceStateMapping convertResourceState(ResourceStates state, bool isImage,
-        bool useGeneralLayout, bool isDepthStencil)
+        bool useGeneralLayout, bool isDepthStencil, ShaderType shaderStages)
     {
         ResourceStateMapping result = {};
         const ResourceStates shaderDepthRead =
@@ -381,14 +384,61 @@ namespace nvrhi::vulkan
 
         assert(result.nvrhiState == state);
 
+        const ResourceStates allCommandsShaderStates =
+            ResourceStates::ConstantBuffer
+            | ResourceStates::ShaderResource
+            | ResourceStates::UnorderedAccess;
+        const bool hasAllCommandsShaderState =
+            (state & allCommandsShaderStates) != 0;
+        const bool hasAccelStructRead =
+            (state & ResourceStates::AccelStructRead) != 0;
+
+        if ((hasAllCommandsShaderState || hasAccelStructRead)
+            && shaderStages != ShaderType::All)
+        {
+            if (shaderStages == ShaderType::None)
+                shaderStages = ShaderType::All;
+
+            if (shaderStages != ShaderType::All)
+            {
+                const vk::PipelineStageFlags2 qualifiedStages =
+                    convertShaderTypeToPipelineStageFlags(shaderStages);
+                assert(qualifiedStages);
+
+                if (hasAllCommandsShaderState)
+                {
+                    // Present is the only non-shader state that also contributes
+                    // ALL_COMMANDS. Preserve it if an invalid combined state ever
+                    // reaches this helper instead of narrowing that contribution.
+                    if ((state & ResourceStates::Present) == 0)
+                    {
+                        result.stageFlags &= ~vk::PipelineStageFlags2(
+                            vk::PipelineStageFlagBits2::eAllCommands);
+                    }
+                    result.stageFlags |= qualifiedStages;
+                }
+
+                if (hasAccelStructRead)
+                {
+                    result.stageFlags &= ~vk::PipelineStageFlags2(
+                        vk::PipelineStageFlagBits2::eRayTracingShaderKHR
+                        | vk::PipelineStageFlagBits2::eComputeShader);
+                    result.stageFlags |= qualifiedStages;
+                }
+            }
+        }
+
         return result;
     }
 
-    ResourceStateMapping convertTextureState(ResourceStates state, const TextureDesc& desc)
+    ResourceStateMapping convertTextureState(
+        ResourceStates state,
+        const TextureDesc& desc,
+        ShaderType shaderStages)
     {
         const FormatInfo& formatInfo = getFormatInfo(desc.format);
         return convertResourceState(state, true, desc.useGeneralLayout,
-            formatInfo.hasDepth || formatInfo.hasStencil);
+            formatInfo.hasDepth || formatInfo.hasStencil, shaderStages);
     }
 
     vk::ImageLayout convertTextureLayout(ResourceStates state, const TextureDesc& desc)

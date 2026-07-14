@@ -33,6 +33,73 @@ namespace nvrhi
         const ResourceStates c_ShaderDepthRead =
             ResourceStates::ShaderResource | ResourceStates::DepthRead;
 
+        const ResourceStates c_AllCommandsShaderStates =
+            ResourceStates::ConstantBuffer
+            | ResourceStates::ShaderResource
+            | ResourceStates::UnorderedAccess;
+
+        const ResourceStates c_ShaderVisibleStates =
+            c_AllCommandsShaderStates | ResourceStates::AccelStructRead;
+
+        bool hasShaderVisibility(ResourceStates state)
+        {
+            return (state & c_ShaderVisibleStates) != 0;
+        }
+
+        ShaderType normalizeShaderStages(ResourceStates state, ShaderType shaderStages)
+        {
+            if (!hasShaderVisibility(state))
+                return ShaderType::None;
+
+            // None is not a valid scope for a shader-visible access. Treat it
+            // like the legacy unqualified request. Shader resources that used
+            // ALL_COMMANDS keep that scope; acceleration-structure reads retain
+            // their historical compute + RT-pipeline scope while still allowing
+            // later inline ray-query stages to be unioned explicitly.
+            if (shaderStages == ShaderType::None || shaderStages == ShaderType::All)
+            {
+                if ((state & c_AllCommandsShaderStates) != 0)
+                    return ShaderType::All;
+
+                return ShaderType::Compute | ShaderType::AllRayTracing;
+            }
+
+            return shaderStages;
+        }
+
+        ShaderType resolveEffectiveShaderStages(
+            ResourceStates requiredState,
+            ResourceStates effectiveState,
+            ShaderType requestedStages,
+            ShaderType currentStages)
+        {
+            if (!hasShaderVisibility(effectiveState))
+                return ShaderType::None;
+
+            // preserveShaderDepthReadState can retain an existing sampled
+            // ShaderResource bit when a framebuffer asks only for DepthRead.
+            // That fixed-function request must not broaden shader visibility.
+            if (!hasShaderVisibility(requiredState))
+                return currentStages == ShaderType::None
+                    ? ShaderType::All
+                    : currentStages;
+
+            return normalizeShaderStages(effectiveState, requestedStages);
+        }
+
+        ShaderType advanceOutstandingShaderStages(
+            ShaderType stagesBefore,
+            ShaderType stagesAfter,
+            bool barrierPlaced)
+        {
+            // Accesses not separated by a dependency remain outstanding. A
+            // later WAR/RAW/WAW barrier must wait on every such shader stage.
+            if (!barrierPlaced)
+                return stagesBefore | stagesAfter;
+
+            return stagesAfter;
+        }
+
         ResourceStates preserveShaderDepthReadState(ResourceStates currentState, ResourceStates requiredState)
         {
             // A texture sampled while it is a read-only depth attachment must retain
@@ -84,7 +151,11 @@ namespace nvrhi
         tracking->firstUavBarrierPlaced = false;
     }
 
-    void CommandListResourceStateTracker::beginTrackingTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates stateBits)
+    void CommandListResourceStateTracker::beginTrackingTextureState(
+        TextureStateExtension* texture,
+        TextureSubresourceSet subresources,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
     {
         const TextureDesc& desc = texture->descRef;
 
@@ -95,12 +166,17 @@ namespace nvrhi
         if (subresources.isEntireTexture(desc))
         {
             tracking->state = stateBits;
+            tracking->shaderStages = normalizeShaderStages(stateBits, shaderStages);
             tracking->subresourceStates.clear();
+            tracking->subresourceShaderStages.clear();
         }
         else
         {
             tracking->subresourceStates.resize(desc.mipLevels * desc.arraySize, tracking->state);
+            tracking->subresourceShaderStages.resize(
+                desc.mipLevels * desc.arraySize, tracking->shaderStages);
             tracking->state = ResourceStates::Unknown;
+            tracking->shaderStages = ShaderType::None;
 
             for (MipLevel mipLevel = subresources.baseMipLevel; mipLevel < subresources.baseMipLevel + subresources.numMipLevels; mipLevel++)
             {
@@ -108,16 +184,22 @@ namespace nvrhi
                 {
                     uint32_t subresource = calcSubresource(mipLevel, arraySlice, desc);
                     tracking->subresourceStates[subresource] = stateBits;
+                    tracking->subresourceShaderStages[subresource] =
+                        normalizeShaderStages(stateBits, shaderStages);
                 }
             }
         }
     }
 
-    void CommandListResourceStateTracker::beginTrackingBufferState(BufferStateExtension* buffer, ResourceStates stateBits)
+    void CommandListResourceStateTracker::beginTrackingBufferState(
+        BufferStateExtension* buffer,
+        ResourceStates stateBits,
+        ShaderType shaderStages)
     {
         BufferState* tracking = getBufferStateTracking(buffer, true);
 
         tracking->state = stateBits;
+        tracking->shaderStages = normalizeShaderStages(stateBits, shaderStages);
     }
 
     void CommandListResourceStateTracker::setPermanentTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates stateBits)
@@ -180,7 +262,11 @@ namespace nvrhi
         return tracking->state;
     }
     
-    void CommandListResourceStateTracker::requireTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates state)
+    void CommandListResourceStateTracker::requireTextureState(
+        TextureStateExtension* texture,
+        TextureSubresourceSet subresources,
+        ResourceStates state,
+        ShaderType shaderStages)
     {
         if (texture->permanentState != 0)
         {
@@ -206,6 +292,8 @@ namespace nvrhi
             // We're requiring state for the entire texture, and it's been tracked as entire texture too
 
             const ResourceStates effectiveState = preserveShaderDepthReadState(tracking->state, state);
+            const ShaderType effectiveShaderStages = resolveEffectiveShaderStages(
+                state, effectiveState, shaderStages, tracking->shaderStages);
             bool transitionNecessary = tracking->state != effectiveState;
             bool uavNecessary = ((effectiveState & ResourceStates::UnorderedAccess) != 0)
                 && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
@@ -217,9 +305,30 @@ namespace nvrhi
                 barrier.entireTexture = true;
                 barrier.stateBefore = tracking->state;
                 barrier.stateAfter = effectiveState;
+                barrier.shaderStagesBefore = tracking->shaderStages;
+                barrier.shaderStagesAfter = effectiveShaderStages;
                 m_TextureBarriers.push_back(barrier);
             }
+            else
+            {
+                // A prior transition into this state may still be pending.
+                // Widen its destination stage so every declared first use is
+                // covered when the barriers are eventually committed.
+                for (TextureBarrier& barrier : m_TextureBarriers)
+                {
+                    if (barrier.texture == texture
+                        && barrier.stateAfter == effectiveState)
+                    {
+                        barrier.shaderStagesAfter =
+                            barrier.shaderStagesAfter | effectiveShaderStages;
+                    }
+                }
+            }
 
+            tracking->shaderStages = advanceOutstandingShaderStages(
+                tracking->shaderStages,
+                effectiveShaderStages,
+                transitionNecessary || uavNecessary);
             tracking->state = effectiveState;
 
             if (uavNecessary && !transitionNecessary)
@@ -236,7 +345,11 @@ namespace nvrhi
             if (tracking->subresourceStates.empty())
             {
                 tracking->subresourceStates.resize(texture->descRef.mipLevels * texture->descRef.arraySize, tracking->state);
+                tracking->subresourceShaderStages.resize(
+                    texture->descRef.mipLevels * texture->descRef.arraySize,
+                    tracking->shaderStages);
                 tracking->state = ResourceStates::Unknown;
+                tracking->shaderStages = ShaderType::None;
                 stateExpanded = true;
             }
             
@@ -250,6 +363,10 @@ namespace nvrhi
 
                     auto priorState = tracking->subresourceStates[subresourceIndex];
                     const ResourceStates effectiveState = preserveShaderDepthReadState(priorState, state);
+                    const ShaderType priorShaderStages =
+                        tracking->subresourceShaderStages[subresourceIndex];
+                    const ShaderType effectiveShaderStages = resolveEffectiveShaderStages(
+                        state, effectiveState, shaderStages, priorShaderStages);
 
                     if (priorState == ResourceStates::Unknown && !stateExpanded)
                     {
@@ -274,9 +391,32 @@ namespace nvrhi
                         barrier.arraySlice = arraySlice;
                         barrier.stateBefore = priorState;
                         barrier.stateAfter = effectiveState;
+                        barrier.shaderStagesBefore = priorShaderStages;
+                        barrier.shaderStagesAfter = effectiveShaderStages;
                         m_TextureBarriers.push_back(barrier);
                     }
+                    else
+                    {
+                        for (TextureBarrier& barrier : m_TextureBarriers)
+                        {
+                            const bool coversSubresource = barrier.entireTexture
+                                || (barrier.mipLevel == mipLevel
+                                    && barrier.arraySlice == arraySlice);
+                            if (barrier.texture == texture
+                                && coversSubresource
+                                && barrier.stateAfter == effectiveState)
+                            {
+                                barrier.shaderStagesAfter =
+                                    barrier.shaderStagesAfter | effectiveShaderStages;
+                            }
+                        }
+                    }
 
+                    tracking->subresourceShaderStages[subresourceIndex] =
+                        advanceOutstandingShaderStages(
+                            priorShaderStages,
+                            effectiveShaderStages,
+                            transitionNecessary || uavNecessary);
                     tracking->subresourceStates[subresourceIndex] = effectiveState;
 
                     if (uavNecessary && !transitionNecessary)
@@ -289,7 +429,10 @@ namespace nvrhi
         }
     }
 
-    void CommandListResourceStateTracker::requireBufferState(BufferStateExtension* buffer, ResourceStates state)
+    void CommandListResourceStateTracker::requireBufferState(
+        BufferStateExtension* buffer,
+        ResourceStates state,
+        ShaderType shaderStages)
     {
         if (buffer->descRef.isVolatile)
             return;
@@ -318,6 +461,8 @@ namespace nvrhi
             m_MessageCallback->message(MessageSeverity::Error, ss.str().c_str());
         }
 
+        const ShaderType effectiveShaderStages =
+            normalizeShaderStages(state, shaderStages);
         bool transitionNecessary = tracking->state != state;
         bool uavNecessary = ((state & ResourceStates::UnorderedAccess) != 0)
             && (tracking->enableUavBarriers || !tracking->firstUavBarrierPlaced);
@@ -332,7 +477,10 @@ namespace nvrhi
                 if (barrier.buffer == buffer)
                 {
                     barrier.stateAfter = ResourceStates(barrier.stateAfter | state);
+                    barrier.shaderStagesAfter =
+                        barrier.shaderStagesAfter | effectiveShaderStages;
                     tracking->state = barrier.stateAfter;
+                    tracking->shaderStages = barrier.shaderStagesAfter;
                     return;
                 }
             }
@@ -344,7 +492,20 @@ namespace nvrhi
             barrier.buffer = buffer;
             barrier.stateBefore = tracking->state;
             barrier.stateAfter = state;
+            barrier.shaderStagesBefore = tracking->shaderStages;
+            barrier.shaderStagesAfter = effectiveShaderStages;
             m_BufferBarriers.push_back(barrier);
+        }
+        else
+        {
+            for (BufferBarrier& barrier : m_BufferBarriers)
+            {
+                if (barrier.buffer == buffer && barrier.stateAfter == state)
+                {
+                    barrier.shaderStagesAfter =
+                        barrier.shaderStagesAfter | effectiveShaderStages;
+                }
+            }
         }
 
         if (uavNecessary && !transitionNecessary)
@@ -352,6 +513,10 @@ namespace nvrhi
             tracking->firstUavBarrierPlaced = true;
         }
     
+        tracking->shaderStages = advanceOutstandingShaderStages(
+            tracking->shaderStages,
+            effectiveShaderStages,
+            transitionNecessary || uavNecessary);
         tracking->state = state;
     }
 
@@ -444,6 +609,8 @@ namespace nvrhi
         if (texture->descRef.keepInitialState)
         {
             tracking->state = texture->stateInitialized ? texture->descRef.initialState : ResourceStates::Common;
+            tracking->shaderStages = normalizeShaderStages(
+                tracking->state, ShaderType::All);
         }
 
         return tracking;
@@ -469,6 +636,8 @@ namespace nvrhi
         if (buffer->descRef.keepInitialState)
         {
             tracking->state = buffer->descRef.initialState;
+            tracking->shaderStages = normalizeShaderStages(
+                tracking->state, ShaderType::All);
         }
 
         return tracking;
