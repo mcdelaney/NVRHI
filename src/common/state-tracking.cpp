@@ -367,7 +367,8 @@ namespace nvrhi
         TextureStateExtension* texture,
         TextureSubresourceSet subresources,
         ResourceStates state,
-        ShaderType shaderStages)
+        ShaderType shaderStages,
+        bool preserveReadOnlyDepthState)
     {
         if (texture->permanentState != 0)
         {
@@ -392,7 +393,9 @@ namespace nvrhi
         {
             // We're requiring state for the entire texture, and it's been tracked as entire texture too
 
-            const ResourceStates effectiveState = preserveShaderDepthReadState(tracking->state, state);
+            const ResourceStates effectiveState = preserveReadOnlyDepthState
+                ? preserveShaderDepthReadState(tracking->state, state)
+                : state;
             const ShaderType effectiveShaderStages = resolveEffectiveShaderStages(
                 state, effectiveState, shaderStages, tracking->shaderStages);
             bool transitionNecessary = tracking->state != effectiveState;
@@ -481,7 +484,9 @@ namespace nvrhi
                     uint32_t subresourceIndex = calcSubresource(mipLevel, arraySlice, texture->descRef);
 
                     auto priorState = tracking->subresourceStates[subresourceIndex];
-                    const ResourceStates effectiveState = preserveShaderDepthReadState(priorState, state);
+                    const ResourceStates effectiveState = preserveReadOnlyDepthState
+                        ? preserveShaderDepthReadState(priorState, state)
+                        : state;
                     const ShaderType priorShaderStages =
                         tracking->subresourceShaderStages[subresourceIndex];
                     const ShaderType effectiveShaderStages = resolveEffectiveShaderStages(

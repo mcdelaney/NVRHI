@@ -100,6 +100,38 @@ namespace nvrhi::vulkan
         MemoryDependencyDesc& setShaderStagesAfter(ShaderType value) { shaderStagesAfter = value; return *this; }
     };
 
+    // Exact graph-owned state used to initialize an open command list's local
+    // tracker. Shader-visible states require a non-None shader-stage mask;
+    // ShaderType::All is accepted here as the exact logical union of every
+    // concrete stage (not as a declaration-time unknown-scope sentinel).
+    // Vulkan lowering remains conservative for aggregate masks and may use
+    // ALL_COMMANDS or ALL_GRAPHICS. Fixed-function states require
+    // ShaderType::None.
+    struct GraphResourceState
+    {
+        ResourceStates state = ResourceStates::Unknown;
+        ShaderType shaderStages = ShaderType::None;
+
+        GraphResourceState& setState(ResourceStates value) { state = value; return *this; }
+        GraphResourceState& setShaderStages(ShaderType value) { shaderStages = value; return *this; }
+    };
+
+    // Exact logical transition authored by a graph. stateBefore and
+    // shaderStagesBefore must exactly match every addressed tracked
+    // subresource. shaderStagesAfter qualifies the exact destination state.
+    struct GraphResourceStateTransition
+    {
+        ResourceStates stateBefore = ResourceStates::Unknown;
+        ResourceStates stateAfter = ResourceStates::Unknown;
+        ShaderType shaderStagesBefore = ShaderType::None;
+        ShaderType shaderStagesAfter = ShaderType::None;
+
+        GraphResourceStateTransition& setStateBefore(ResourceStates value) { stateBefore = value; return *this; }
+        GraphResourceStateTransition& setStateAfter(ResourceStates value) { stateAfter = value; return *this; }
+        GraphResourceStateTransition& setShaderStagesBefore(ShaderType value) { shaderStagesBefore = value; return *this; }
+        GraphResourceStateTransition& setShaderStagesAfter(ShaderType value) { shaderStagesAfter = value; return *this; }
+    };
+
     // Raw timestamps captured by a timer query. The timestamp values are
     // masked to timestampValidBits, as reported by the Vulkan queue family
     // that recorded the query. Consumers must use modular subtraction when
@@ -203,6 +235,51 @@ namespace nvrhi::vulkan
         virtual bool addBufferMemoryDependency(
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) = 0;
+
+        // Fail-closed graph tracker initialization. If every addressed
+        // subresource is unknown, these methods initialize it to exactState.
+        // If every addressed subresource is already tracked in the exact same
+        // logical state and shader-stage scope, they are idempotent. Mixed
+        // known/unknown ranges and state or stage mismatches fail.
+        // Resources must be Vulkan-managed, graph-managed
+        // (keepInitialState == false, no permanent state), and belong to this
+        // device. commandList must be open and belong to this device.
+        // Because NVRHI wraps an externally created VkDevice, these calls do
+        // not validate which optional features were enabled at device creation.
+        // Callers requiring fail-closed feature validation must preflight every
+        // declared shader-stage bit and optional fixed-function resource state
+        // before invoking them. Aggregate shader masks require every
+        // constituent stage to be enabled.
+        // A graph-owned resource range must not also be seeded or mutated by
+        // legacy unqualified state APIs on the same command list. The tracker
+        // stores ShaderType::All as a mask without provenance and therefore
+        // cannot distinguish an exact full-stage graph union from a legacy
+        // conservative None/All request; exclusive graph state ownership is a
+        // caller invariant.
+        virtual bool ensureTextureStateTracked(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceState& exactState) = 0;
+        virtual bool ensureBufferStateTracked(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceState& exactState) = 0;
+
+        // Fail-closed graph-authored logical transitions. Every addressed
+        // subresource must already be tracked in transition.stateBefore and
+        // transition.shaderStagesBefore exactly.
+        // Successful transitions remain pending until the caller invokes
+        // ICommandList::commitBarriers, allowing independent graph transitions
+        // to batch. If an earlier pending transition overlaps the same resource
+        // range, it is emitted first to preserve sequential ordering; the newly
+        // requested transition remains pending. The same command-list/resource
+        // ownership and graph-managed restrictions as the ensure methods apply.
+        virtual bool transitionTextureState(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceStateTransition& transition) = 0;
+        virtual bool transitionBufferState(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceStateTransition& transition) = 0;
 
         // Records one half of a queue-family ownership transfer. These calls
         // are valid only for exclusive, NVRHI-managed, graph-tracked resources

@@ -123,7 +123,8 @@ namespace nvrhi
         // Internal interface
         
         void requireTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources,
-            ResourceStates state, ShaderType shaderStages = ShaderType::All);
+            ResourceStates state, ShaderType shaderStages = ShaderType::All,
+            bool preserveReadOnlyDepthState = true);
         void requireBufferState(BufferStateExtension* buffer, ResourceStates state,
             ShaderType shaderStages = ShaderType::All);
         bool addTextureMemoryDependency(TextureStateExtension* texture,

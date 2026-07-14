@@ -185,6 +185,40 @@ namespace
         uint32_t errors = 0;
     };
 
+    class ForeignTexture final : public nvrhi::ITexture
+    {
+    public:
+        unsigned long AddRef() override { return ++references; }
+        unsigned long Release() override { return references ? --references : 0; }
+        unsigned long GetRefCount() override { return references; }
+        const nvrhi::TextureDesc& getDesc() const override { return desc; }
+        nvrhi::Object getNativeView(
+            nvrhi::ObjectType,
+            nvrhi::Format,
+            nvrhi::TextureSubresourceSet,
+            nvrhi::TextureDimension,
+            bool) override
+        {
+            return nullptr;
+        }
+
+        nvrhi::TextureDesc desc {};
+        unsigned long references = 1;
+    };
+
+    class ForeignBuffer final : public nvrhi::IBuffer
+    {
+    public:
+        unsigned long AddRef() override { return ++references; }
+        unsigned long Release() override { return references ? --references : 0; }
+        unsigned long GetRefCount() override { return references; }
+        const nvrhi::BufferDesc& getDesc() const override { return desc; }
+        nvrhi::GpuVirtualAddress getGpuVirtualAddress() const override { return 0; }
+
+        nvrhi::BufferDesc desc {};
+        unsigned long references = 1;
+    };
+
     bool hasLayer(const char* name)
     {
         uint32_t count = 0;
@@ -641,6 +675,9 @@ int main()
         {
             const nvrhi::vulkan::QueueOwnershipTransferDesc defaultTransfer {};
             const nvrhi::vulkan::MemoryDependencyDesc defaultDependency {};
+            const nvrhi::vulkan::GraphResourceState defaultGraphState {};
+            const nvrhi::vulkan::GraphResourceStateTransition
+                defaultGraphTransition {};
             nvrhi::TextureDesc ownershipTextureDesc {};
             ownershipTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
             const auto ownershipBefore = nvrhi::vulkan::convertTextureState(
@@ -680,7 +717,7 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 28
+            mappingPassed &= nvrhi::c_HeaderVersion == 29
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
@@ -688,6 +725,16 @@ int main()
                 && defaultDependency.state == nvrhi::ResourceStates::Unknown
                 && defaultDependency.shaderStagesBefore == nvrhi::ShaderType::All
                 && defaultDependency.shaderStagesAfter == nvrhi::ShaderType::All
+                && defaultGraphState.state == nvrhi::ResourceStates::Unknown
+                && defaultGraphState.shaderStages == nvrhi::ShaderType::None
+                && defaultGraphTransition.stateBefore
+                    == nvrhi::ResourceStates::Unknown
+                && defaultGraphTransition.stateAfter
+                    == nvrhi::ResourceStates::Unknown
+                && defaultGraphTransition.shaderStagesBefore
+                    == nvrhi::ShaderType::None
+                && defaultGraphTransition.shaderStagesAfter
+                    == nvrhi::ShaderType::None
                 && imageRelease.srcStageMask
                     == vk::PipelineStageFlagBits2::eTransfer
                 && imageRelease.srcAccessMask
@@ -2405,6 +2452,450 @@ int main()
                 device->unmapStagingTexture(dependencyTextureReadback);
             }
         }
+    }
+
+    // Strict graph tracking initializes fresh command-list state exactly,
+    // accepts exact idempotent ensures, retains transitioned resources,
+    // orders sequential overlapping transitions, and leaves the final
+    // transitions pending for one caller-controlled barrier commit.
+    {
+        nvrhi::BufferDesc graphBufferDesc {};
+        graphBufferDesc.byteSize = 64;
+        graphBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        graphBufferDesc.keepInitialState = false;
+        graphBufferDesc.debugName = "StrictGraphBuffer";
+        nvrhi::BufferHandle graphBuffer = device->createBuffer(graphBufferDesc);
+        graphBufferDesc.debugName = "StrictGraphAllStagesBuffer";
+        nvrhi::BufferHandle graphAllStagesBuffer =
+            device->createBuffer(graphBufferDesc);
+        graphBufferDesc.debugName = "StrictGraphEnsureOnlyBuffer";
+        nvrhi::BufferHandle graphEnsureOnlyBuffer =
+            device->createBuffer(graphBufferDesc);
+
+        nvrhi::TextureDesc graphTextureDesc {};
+        graphTextureDesc.width = 4;
+        graphTextureDesc.height = 4;
+        graphTextureDesc.mipLevels = 2;
+        graphTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        graphTextureDesc.initialState = nvrhi::ResourceStates::Common;
+        graphTextureDesc.keepInitialState = false;
+        graphTextureDesc.debugName = "StrictGraphTexture";
+        nvrhi::TextureHandle graphTexture =
+            device->createTexture(graphTextureDesc);
+        graphTextureDesc.debugName = "StrictGraphEnsureOnlyTexture";
+        nvrhi::TextureHandle graphEnsureOnlyTexture =
+            device->createTexture(graphTextureDesc);
+
+        nvrhi::CommandListHandle graphList = device->createCommandList(
+            nvrhi::CommandListParameters().setQueueType(
+                nvrhi::CommandQueue::Graphics));
+        passed &= graphBuffer && graphAllStagesBuffer && graphEnsureOnlyBuffer
+            && graphTexture && graphEnsureOnlyTexture && graphList;
+        if (graphBuffer && graphAllStagesBuffer && graphEnsureOnlyBuffer
+            && graphTexture && graphEnsureOnlyTexture && graphList)
+        {
+            nvrhi::vulkan::GraphResourceState common {};
+            common.setState(nvrhi::ResourceStates::Common)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceState shaderRead {};
+            shaderRead.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::Pixel);
+            nvrhi::vulkan::GraphResourceState shaderAll {};
+            shaderAll.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::All);
+            nvrhi::vulkan::GraphResourceState copyDest {};
+            copyDest.setState(nvrhi::ResourceStates::CopyDest)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceStateTransition toShaderRead {};
+            toShaderRead.setStateBefore(nvrhi::ResourceStates::Common)
+                .setStateAfter(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStagesBefore(nvrhi::ShaderType::None)
+                .setShaderStagesAfter(nvrhi::ShaderType::Pixel);
+            nvrhi::vulkan::GraphResourceStateTransition shaderReadToCopy {};
+            shaderReadToCopy.setStateBefore(
+                    nvrhi::ResourceStates::ShaderResource)
+                .setStateAfter(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::Pixel)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceStateTransition allToCopy {};
+            allToCopy.setStateBefore(nvrhi::ResourceStates::ShaderResource)
+                .setStateAfter(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::All)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+            graphList->open();
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphBuffer, common);
+            passed &= device->ensureTextureStateTracked(
+                graphList, graphTexture, nvrhi::AllSubresources, common);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphAllStagesBuffer, shaderAll);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphEnsureOnlyBuffer, common);
+            passed &= device->ensureTextureStateTracked(
+                graphList, graphEnsureOnlyTexture,
+                nvrhi::AllSubresources, common);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphAllStagesBuffer, shaderAll);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphBuffer, common);
+            passed &= device->ensureTextureStateTracked(
+                graphList, graphTexture, nvrhi::AllSubresources, common);
+            passed &= device->transitionBufferState(
+                graphList, graphBuffer, toShaderRead);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphBuffer, shaderRead);
+            passed &= device->transitionBufferState(
+                graphList, graphBuffer, shaderReadToCopy);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphBuffer, copyDest);
+            passed &= device->transitionTextureState(
+                graphList, graphTexture, nvrhi::AllSubresources,
+                toShaderRead);
+            passed &= device->ensureTextureStateTracked(
+                graphList, graphTexture, nvrhi::AllSubresources,
+                shaderRead);
+            passed &= device->transitionTextureState(
+                graphList, graphTexture, nvrhi::AllSubresources,
+                shaderReadToCopy);
+            passed &= device->ensureTextureStateTracked(
+                graphList, graphTexture, nvrhi::AllSubresources,
+                copyDest);
+            passed &= device->transitionBufferState(
+                graphList, graphAllStagesBuffer, allToCopy);
+            passed &= device->ensureBufferStateTracked(
+                graphList, graphAllStagesBuffer, copyDest);
+
+            auto* vulkanGraphList =
+                dynamic_cast<nvrhi::vulkan::CommandList*>(graphList.Get());
+            passed &= vulkanGraphList != nullptr;
+            if (vulkanGraphList)
+            {
+                const auto commandBuffer = vulkanGraphList->getCurrentCmdBuf();
+                const auto hasReference = [&](nvrhi::IResource* resource) {
+                    return commandBuffer && std::any_of(
+                        commandBuffer->referencedResources.begin(),
+                        commandBuffer->referencedResources.end(),
+                        [resource](const nvrhi::RefCountPtr<nvrhi::IResource>& item) {
+                            return item.Get() == resource;
+                        });
+                };
+                passed &= hasReference(graphBuffer.Get());
+                passed &= hasReference(graphAllStagesBuffer.Get());
+                passed &= hasReference(graphEnsureOnlyBuffer.Get());
+                passed &= hasReference(graphTexture.Get());
+                passed &= hasReference(graphEnsureOnlyTexture.Get());
+            }
+
+            // Drop every caller-owned handle before barrier emission and
+            // close. Strict graph tracking must retain even ensure-only
+            // resources while its local tracker still contains raw pointers.
+            graphBuffer = nullptr;
+            graphAllStagesBuffer = nullptr;
+            graphEnsureOnlyBuffer = nullptr;
+            graphTexture = nullptr;
+            graphEnsureOnlyTexture = nullptr;
+            graphList->commitBarriers();
+            graphList->close();
+
+            nvrhi::ICommandList* graphListPtr = graphList.Get();
+            const uint64_t graphSubmitId =
+                device->executeCommandListsWithSyncIsolated(
+                    &graphListPtr,
+                    1,
+                    nvrhi::CommandQueue::Graphics,
+                    emptyExtras);
+            passed &= graphSubmitId > previousId;
+            previousId = graphSubmitId;
+            passed &= waitTimeline(
+                vkDevice,
+                device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
+                graphSubmitId);
+        }
+    }
+
+    // Strict graph operations reject untrusted object provenance, closed
+    // command lists, non-graph-managed resources, ambiguous texture ranges,
+    // inexact seed state/stages, and inexact transition sources.
+    {
+        const uint32_t errorsBeforeGraphRejections = messageCallback.errors;
+
+        nvrhi::BufferDesc trackedBufferDesc {};
+        trackedBufferDesc.byteSize = 64;
+        trackedBufferDesc.initialState = nvrhi::ResourceStates::Common;
+        trackedBufferDesc.keepInitialState = false;
+        trackedBufferDesc.debugName = "StrictGraphTrackedBuffer";
+        nvrhi::BufferHandle trackedBuffer =
+            device->createBuffer(trackedBufferDesc);
+        trackedBufferDesc.debugName = "StrictGraphStageBuffer";
+        nvrhi::BufferHandle stageBuffer =
+            device->createBuffer(trackedBufferDesc);
+        trackedBufferDesc.debugName = "StrictGraphPermanentBuffer";
+        nvrhi::BufferHandle permanentBuffer =
+            device->createBuffer(trackedBufferDesc);
+
+        nvrhi::TextureDesc rangeTextureDesc {};
+        rangeTextureDesc.width = 4;
+        rangeTextureDesc.height = 4;
+        rangeTextureDesc.mipLevels = 2;
+        rangeTextureDesc.arraySize = 2;
+        rangeTextureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        rangeTextureDesc.initialState = nvrhi::ResourceStates::Common;
+        rangeTextureDesc.keepInitialState = false;
+        rangeTextureDesc.debugName = "StrictGraphRangeTexture";
+        nvrhi::TextureHandle rangeTexture =
+            device->createTexture(rangeTextureDesc);
+        rangeTextureDesc.mipLevels = 1;
+        rangeTextureDesc.debugName = "StrictGraphPermanentTexture";
+        nvrhi::TextureHandle permanentTexture =
+            device->createTexture(rangeTextureDesc);
+
+        nvrhi::BufferDesc keepBufferDesc = trackedBufferDesc;
+        keepBufferDesc.keepInitialState = true;
+        keepBufferDesc.debugName = "StrictGraphKeepInitialBuffer";
+        nvrhi::BufferHandle keepBuffer = device->createBuffer(keepBufferDesc);
+        nvrhi::TextureDesc keepTextureDesc = rangeTextureDesc;
+        keepTextureDesc.keepInitialState = true;
+        keepTextureDesc.debugName = "StrictGraphKeepInitialTexture";
+        nvrhi::TextureHandle keepTexture =
+            device->createTexture(keepTextureDesc);
+
+        nvrhi::BufferDesc cpuBufferDesc = trackedBufferDesc;
+        cpuBufferDesc.cpuAccess = nvrhi::CpuAccessMode::Read;
+        cpuBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        cpuBufferDesc.debugName = "StrictGraphCpuBuffer";
+        nvrhi::BufferHandle cpuBuffer = device->createBuffer(cpuBufferDesc);
+        nvrhi::BufferDesc volatileBufferDesc = trackedBufferDesc;
+        volatileBufferDesc.isConstantBuffer = true;
+        volatileBufferDesc.isVolatile = true;
+        volatileBufferDesc.maxVersions = 2;
+        volatileBufferDesc.debugName = "StrictGraphVolatileBuffer";
+        nvrhi::BufferHandle volatileBuffer =
+            device->createBuffer(volatileBufferDesc);
+
+        nvrhi::CommandListHandle graphRejectionList =
+            device->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Graphics));
+
+        nvrhi::vulkan::DeviceHandle foreignDevice =
+            nvrhi::vulkan::createDevice(nvrhiDesc);
+        nvrhi::BufferHandle foreignBuffer;
+        nvrhi::CommandListHandle foreignList;
+        if (foreignDevice)
+        {
+            trackedBufferDesc.debugName = "StrictGraphForeignBuffer";
+            foreignBuffer = foreignDevice->createBuffer(trackedBufferDesc);
+            foreignList = foreignDevice->createCommandList(
+                nvrhi::CommandListParameters().setQueueType(
+                    nvrhi::CommandQueue::Graphics));
+        }
+
+        passed &= trackedBuffer && stageBuffer && permanentBuffer
+            && rangeTexture && permanentTexture && keepBuffer && keepTexture
+            && cpuBuffer && volatileBuffer && graphRejectionList
+            && foreignDevice && foreignBuffer && foreignList;
+        if (trackedBuffer && stageBuffer && permanentBuffer
+            && rangeTexture && permanentTexture && keepBuffer && keepTexture
+            && cpuBuffer && volatileBuffer && graphRejectionList
+            && foreignDevice && foreignBuffer && foreignList)
+        {
+            nvrhi::vulkan::GraphResourceState common {};
+            common.setState(nvrhi::ResourceStates::Common)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceState copyDest {};
+            copyDest.setState(nvrhi::ResourceStates::CopyDest)
+                .setShaderStages(nvrhi::ShaderType::None);
+            nvrhi::vulkan::GraphResourceState shaderPixel {};
+            shaderPixel.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::Pixel);
+            nvrhi::vulkan::GraphResourceState shaderCompute {};
+            shaderCompute.setState(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStages(nvrhi::ShaderType::Compute);
+
+            nvrhi::vulkan::GraphResourceStateTransition commonToCopy {};
+            commonToCopy.setStateBefore(nvrhi::ResourceStates::Common)
+                .setStateAfter(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::None)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+
+            // Closed command list.
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, trackedBuffer, common);
+            passed &= !device->transitionBufferState(
+                graphRejectionList, trackedBuffer, commonToCopy);
+
+            graphRejectionList->open();
+
+            // Non-Vulkan object types and wrong device ownership.
+            ForeignTexture foreignTextureType;
+            ForeignBuffer foreignBufferType;
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, &foreignTextureType,
+                nvrhi::AllSubresources, common);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, &foreignBufferType, common);
+            passed &= !device->ensureBufferStateTracked(
+                foreignList, trackedBuffer, common);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, foreignBuffer, common);
+
+            // Automatic initial-state restoration and CPU/volatile storage.
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, keepBuffer, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, keepTexture,
+                nvrhi::AllSubresources, common);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, cpuBuffer, copyDest);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, volatileBuffer, common);
+
+            // Unknown state, exact-state mismatch, and exact-stage mismatch.
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, trackedBuffer,
+                nvrhi::vulkan::GraphResourceState {});
+            passed &= device->ensureBufferStateTracked(
+                graphRejectionList, trackedBuffer, common);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, trackedBuffer, copyDest);
+            passed &= device->ensureBufferStateTracked(
+                graphRejectionList, stageBuffer, shaderPixel);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, stageBuffer, shaderCompute);
+
+            // Transition source state and stage must both match exactly.
+            nvrhi::vulkan::GraphResourceStateTransition wrongStateSource {};
+            wrongStateSource.setStateBefore(nvrhi::ResourceStates::CopySource)
+                .setStateAfter(nvrhi::ResourceStates::ShaderResource)
+                .setShaderStagesBefore(nvrhi::ShaderType::None)
+                .setShaderStagesAfter(nvrhi::ShaderType::Pixel);
+            passed &= !device->transitionBufferState(
+                graphRejectionList, trackedBuffer, wrongStateSource);
+            nvrhi::vulkan::GraphResourceStateTransition wrongStageSource {};
+            wrongStageSource.setStateBefore(nvrhi::ResourceStates::ShaderResource)
+                .setStateAfter(nvrhi::ResourceStates::CopyDest)
+                .setShaderStagesBefore(nvrhi::ShaderType::Compute)
+                .setShaderStagesAfter(nvrhi::ShaderType::None);
+            passed &= !device->transitionBufferState(
+                graphRejectionList, stageBuffer, wrongStageSource);
+
+            // Texture ranges are all-unknown or all-known-exact; mixed and
+            // out-of-range declarations fail rather than overwrite tracking.
+            const nvrhi::TextureSubresourceSet mip0(0, 1, 0, 1);
+            const nvrhi::TextureSubresourceSet outOfRange(
+                2, 1, 0, 1);
+            const nvrhi::TextureSubresourceSet overflowingRange(
+                1,
+                nvrhi::TextureSubresourceSet::AllMipLevels - 1,
+                0,
+                1);
+            const nvrhi::TextureSubresourceSet outOfRangeArray(
+                0, 1, 2, 1);
+            const nvrhi::TextureSubresourceSet overflowingArray(
+                0,
+                1,
+                1,
+                nvrhi::TextureSubresourceSet::AllArraySlices - 1);
+            passed &= device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, mip0, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture,
+                nvrhi::AllSubresources, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, outOfRange, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, overflowingRange, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, outOfRangeArray, common);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, overflowingArray, common);
+            passed &= !device->transitionTextureState(
+                graphRejectionList, rangeTexture, outOfRangeArray,
+                commonToCopy);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, rangeTexture, mip0, copyDest);
+
+            // Pending permanent transitions are already outside graph-owned
+            // state lifetime and must reject both resource kinds.
+            passed &= device->ensureBufferStateTracked(
+                graphRejectionList, permanentBuffer, common);
+            graphRejectionList->setPermanentBufferState(
+                permanentBuffer, nvrhi::ResourceStates::CopyDest);
+            passed &= !device->ensureBufferStateTracked(
+                graphRejectionList, permanentBuffer, common);
+            passed &= device->ensureTextureStateTracked(
+                graphRejectionList, permanentTexture,
+                nvrhi::AllSubresources, common);
+            graphRejectionList->setPermanentTextureState(
+                permanentTexture, nvrhi::ResourceStates::CopyDest);
+            passed &= !device->ensureTextureStateTracked(
+                graphRejectionList, permanentTexture,
+                nvrhi::AllSubresources, common);
+
+            graphRejectionList->close();
+            nvrhi::ICommandList* graphRejectionListPtr =
+                graphRejectionList.Get();
+            const uint64_t graphRejectionSubmitId =
+                device->executeCommandListsWithSyncIsolated(
+                    &graphRejectionListPtr,
+                    1,
+                    nvrhi::CommandQueue::Graphics,
+                    emptyExtras);
+            passed &= graphRejectionSubmitId > previousId;
+            previousId = graphRejectionSubmitId;
+            passed &= waitTimeline(
+                vkDevice,
+                device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
+                graphRejectionSubmitId);
+
+            // Submission promotes the pending permanent transitions to the
+            // resource-global state. A fresh command list must reject those
+            // resources independently of pending-transition tracking.
+            nvrhi::CommandListHandle committedPermanentList =
+                device->createCommandList(
+                    nvrhi::CommandListParameters().setQueueType(
+                        nvrhi::CommandQueue::Graphics));
+            passed &= bool(committedPermanentList);
+            if (committedPermanentList)
+            {
+                committedPermanentList->open();
+                passed &= !device->ensureBufferStateTracked(
+                    committedPermanentList, permanentBuffer, common);
+                passed &= !device->ensureTextureStateTracked(
+                    committedPermanentList, permanentTexture,
+                    nvrhi::AllSubresources, common);
+                committedPermanentList->close();
+                nvrhi::ICommandList* committedPermanentListPtr =
+                    committedPermanentList.Get();
+                const uint64_t committedPermanentSubmitId =
+                    device->executeCommandListsWithSyncIsolated(
+                        &committedPermanentListPtr,
+                        1,
+                        nvrhi::CommandQueue::Graphics,
+                        emptyExtras);
+                passed &= committedPermanentSubmitId > previousId;
+                previousId = committedPermanentSubmitId;
+                passed &= waitTimeline(
+                    vkDevice,
+                    device->getQueueSemaphore(
+                        nvrhi::CommandQueue::Graphics),
+                    committedPermanentSubmitId);
+            }
+        }
+
+        passed &= messageCallback.errors
+            == errorsBeforeGraphRejections + 26;
+        messageCallback.errors = errorsBeforeGraphRejections;
+
+        foreignBuffer = nullptr;
+        foreignList = nullptr;
+        if (foreignDevice)
+        {
+            passed &= foreignDevice->waitForIdle();
+            foreignDevice->runGarbageCollection();
+        }
+        foreignDevice = nullptr;
     }
 
     // Public validation failures must be rejected before any Vulkan command is

@@ -154,6 +154,231 @@ namespace nvrhi::vulkan
                 <= texture->desc.arraySize - subresources.baseArraySlice;
     }
 
+    static bool isValidGraphTextureRange(
+        const Texture* texture,
+        const TextureSubresourceSet& subresources)
+    {
+        const TextureDesc& desc = texture->desc;
+        if (desc.mipLevels == 0 || desc.arraySize == 0
+            || subresources.baseMipLevel >= desc.mipLevels
+            || subresources.baseArraySlice >= desc.arraySize)
+        {
+            return false;
+        }
+        const MipLevel mipCount =
+            subresources.numMipLevels == TextureSubresourceSet::AllMipLevels
+                ? desc.mipLevels - subresources.baseMipLevel
+                : subresources.numMipLevels;
+        const ArraySlice sliceCount =
+            subresources.numArraySlices == TextureSubresourceSet::AllArraySlices
+                ? desc.arraySize - subresources.baseArraySlice
+                : subresources.numArraySlices;
+        return mipCount > 0
+            && mipCount <= desc.mipLevels - subresources.baseMipLevel
+            && sliceCount > 0
+            && sliceCount <= desc.arraySize - subresources.baseArraySlice;
+    }
+
+    constexpr uint32_t graphStateBits(ResourceStates state)
+    {
+        return uint32_t(state);
+    }
+
+    constexpr uint32_t c_GraphKnownStateBits =
+        graphStateBits(ResourceStates::Common)
+        | graphStateBits(ResourceStates::ConstantBuffer)
+        | graphStateBits(ResourceStates::VertexBuffer)
+        | graphStateBits(ResourceStates::IndexBuffer)
+        | graphStateBits(ResourceStates::IndirectArgument)
+        | graphStateBits(ResourceStates::ShaderResource)
+        | graphStateBits(ResourceStates::UnorderedAccess)
+        | graphStateBits(ResourceStates::RenderTarget)
+        | graphStateBits(ResourceStates::DepthWrite)
+        | graphStateBits(ResourceStates::DepthRead)
+        | graphStateBits(ResourceStates::StreamOut)
+        | graphStateBits(ResourceStates::CopyDest)
+        | graphStateBits(ResourceStates::CopySource)
+        | graphStateBits(ResourceStates::ResolveDest)
+        | graphStateBits(ResourceStates::ResolveSource)
+        | graphStateBits(ResourceStates::Present)
+        | graphStateBits(ResourceStates::AccelStructRead)
+        | graphStateBits(ResourceStates::AccelStructWrite)
+        | graphStateBits(ResourceStates::AccelStructBuildInput)
+        | graphStateBits(ResourceStates::AccelStructBuildBlas)
+        | graphStateBits(ResourceStates::ShadingRateSurface)
+        | graphStateBits(ResourceStates::OpacityMicromapWrite)
+        | graphStateBits(ResourceStates::OpacityMicromapBuildInput)
+        | graphStateBits(ResourceStates::ConvertCoopVecMatrixInput)
+        | graphStateBits(ResourceStates::ConvertCoopVecMatrixOutput);
+
+    constexpr uint32_t c_GraphTextureStateBits =
+        graphStateBits(ResourceStates::Common)
+        | graphStateBits(ResourceStates::ShaderResource)
+        | graphStateBits(ResourceStates::UnorderedAccess)
+        | graphStateBits(ResourceStates::RenderTarget)
+        | graphStateBits(ResourceStates::DepthWrite)
+        | graphStateBits(ResourceStates::DepthRead)
+        | graphStateBits(ResourceStates::CopyDest)
+        | graphStateBits(ResourceStates::CopySource)
+        | graphStateBits(ResourceStates::ResolveDest)
+        | graphStateBits(ResourceStates::ResolveSource)
+        | graphStateBits(ResourceStates::Present)
+        | graphStateBits(ResourceStates::ShadingRateSurface);
+
+    constexpr uint32_t c_GraphBufferStateBits =
+        graphStateBits(ResourceStates::Common)
+        | graphStateBits(ResourceStates::ConstantBuffer)
+        | graphStateBits(ResourceStates::VertexBuffer)
+        | graphStateBits(ResourceStates::IndexBuffer)
+        | graphStateBits(ResourceStates::IndirectArgument)
+        | graphStateBits(ResourceStates::ShaderResource)
+        | graphStateBits(ResourceStates::UnorderedAccess)
+        | graphStateBits(ResourceStates::StreamOut)
+        | graphStateBits(ResourceStates::CopyDest)
+        | graphStateBits(ResourceStates::CopySource)
+        | graphStateBits(ResourceStates::AccelStructBuildInput)
+        | graphStateBits(ResourceStates::OpacityMicromapWrite)
+        | graphStateBits(ResourceStates::OpacityMicromapBuildInput)
+        | graphStateBits(ResourceStates::ConvertCoopVecMatrixInput)
+        | graphStateBits(ResourceStates::ConvertCoopVecMatrixOutput);
+
+    const ResourceStates c_GraphShaderVisibleStates =
+        ResourceStates::ConstantBuffer
+        | ResourceStates::ShaderResource
+        | ResourceStates::UnorderedAccess
+        | ResourceStates::AccelStructRead;
+
+    bool validateGraphStateKind(
+        const VulkanContext& context,
+        ResourceStates state,
+        bool texture,
+        const TextureDesc* textureDesc,
+        const char* label)
+    {
+        const uint32_t bits = graphStateBits(state);
+        if (state == ResourceStates::Unknown
+            || (bits & ~c_GraphKnownStateBits) != 0)
+        {
+            context.error(std::string(label) + " state is unknown or contains unsupported bits");
+            return false;
+        }
+        if (((state & ResourceStates::Common) != 0
+                && state != ResourceStates::Common)
+            || ((state & ResourceStates::Present) != 0
+                && state != ResourceStates::Present))
+        {
+            context.error(std::string(label) + " combines a standalone resource state");
+            return false;
+        }
+
+        const uint32_t allowed = texture
+            ? c_GraphTextureStateBits : c_GraphBufferStateBits;
+        if ((bits & ~allowed) != 0)
+        {
+            context.error(std::string(label) + " state is incompatible with the resource kind");
+            return false;
+        }
+        if (!texture)
+            return true;
+
+        const FormatInfo& formatInfo = getFormatInfo(textureDesc->format);
+        const bool isDepthStencil = formatInfo.hasDepth || formatInfo.hasStencil;
+        if (((state & (ResourceStates::DepthRead | ResourceStates::DepthWrite)) != 0
+                && !isDepthStencil)
+            || ((state & ResourceStates::RenderTarget) != 0
+                && isDepthStencil))
+        {
+            context.error(std::string(label) + " state is incompatible with the texture format");
+            return false;
+        }
+        if (textureDesc->useGeneralLayout)
+            return true;
+
+        enum class LayoutClass : uint8_t
+        {
+            None,
+            ShaderRead,
+            General,
+            ColorAttachment,
+            DepthAttachment,
+            DepthReadOnly,
+            TransferDestination,
+            TransferSource,
+            Present,
+            ShadingRate,
+        };
+        LayoutClass layout = LayoutClass::None;
+        const bool sampledDepthRead = isDepthStencil
+            && (state & ResourceStates::ShaderResource) != 0
+            && (state & ResourceStates::DepthRead) != 0;
+        const auto mergeLayout = [&](LayoutClass candidate) {
+            if (layout == LayoutClass::None || layout == candidate)
+            {
+                layout = candidate;
+                return true;
+            }
+            return false;
+        };
+        bool valid = true;
+        if ((state & ResourceStates::ShaderResource) != 0)
+            valid &= mergeLayout(sampledDepthRead
+                ? LayoutClass::DepthReadOnly : LayoutClass::ShaderRead);
+        if ((state & ResourceStates::UnorderedAccess) != 0)
+            valid &= mergeLayout(LayoutClass::General);
+        if ((state & ResourceStates::RenderTarget) != 0)
+            valid &= mergeLayout(LayoutClass::ColorAttachment);
+        if ((state & ResourceStates::DepthWrite) != 0)
+            valid &= mergeLayout(LayoutClass::DepthAttachment);
+        if ((state & ResourceStates::DepthRead) != 0)
+            valid &= mergeLayout(LayoutClass::DepthReadOnly);
+        if ((state & (ResourceStates::CopyDest | ResourceStates::ResolveDest)) != 0)
+            valid &= mergeLayout(LayoutClass::TransferDestination);
+        if ((state & (ResourceStates::CopySource | ResourceStates::ResolveSource)) != 0)
+            valid &= mergeLayout(LayoutClass::TransferSource);
+        if ((state & ResourceStates::Present) != 0)
+            valid &= mergeLayout(LayoutClass::Present);
+        if ((state & ResourceStates::ShadingRateSurface) != 0)
+            valid &= mergeLayout(LayoutClass::ShadingRate);
+        if (!valid)
+        {
+            context.error(std::string(label) + " state maps to incompatible image layouts");
+            return false;
+        }
+        return true;
+    }
+
+    bool validateGraphState(
+        const VulkanContext& context,
+        const GraphResourceState& state,
+        bool texture,
+        const TextureDesc* textureDesc,
+        const char* label)
+    {
+        if (!validateGraphStateKind(
+                context, state.state, texture, textureDesc, label))
+        {
+            return false;
+        }
+        if ((uint16_t(state.shaderStages) & ~uint16_t(ShaderType::All)) != 0)
+        {
+            context.error(std::string(label) + " contains unknown shader-stage bits");
+            return false;
+        }
+        const bool shaderVisible =
+            (state.state & c_GraphShaderVisibleStates) != 0;
+        if (shaderVisible && state.shaderStages == ShaderType::None)
+        {
+            context.error(std::string(label) + " shader-visible state requires non-None shader stages");
+            return false;
+        }
+        if (!shaderVisible && state.shaderStages != ShaderType::None)
+        {
+            context.error(std::string(label) + " fixed-function state must use ShaderType::None");
+            return false;
+        }
+        return true;
+    }
+
     static bool validateQueueOwnershipTransfer(
         CommandList* commandList,
         Device* device,
@@ -431,7 +656,8 @@ namespace nvrhi::vulkan
         ITexture* _texture,
         TextureSubresourceSet subresources,
         ResourceStates state,
-        ShaderType shaderStages)
+        ShaderType shaderStages,
+        bool preserveReadOnlyDepthState)
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
@@ -475,7 +701,8 @@ namespace nvrhi::vulkan
         }
 
         m_StateTracker.requireTextureState(
-            texture, subresources, state, shaderStages);
+            texture, subresources, state, shaderStages,
+            preserveReadOnlyDepthState);
     }
 
     void CommandList::requireBufferState(
@@ -1243,6 +1470,455 @@ namespace nvrhi::vulkan
         return true;
     }
 
+    bool CommandList::ensureTextureStateTracked(
+        Texture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceState& exactState)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph texture state must be ensured on an open command list");
+            return false;
+        }
+        if (!texture || !texture->belongsTo(m_Context))
+        {
+            m_Context.error("Graph texture state texture belongs to a different device");
+            return false;
+        }
+        if (!texture->managed)
+        {
+            m_Context.error("Graph texture state requires a Vulkan-managed texture");
+            return false;
+        }
+        if (texture->desc.keepInitialState)
+        {
+            m_Context.error("Graph texture state textures must disable keepInitialState");
+            return false;
+        }
+        if (texture->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentTextureState(texture))
+        {
+            m_Context.error("Graph texture state cannot target a permanent-state texture");
+            return false;
+        }
+        if (!validateGraphState(
+                m_Context, exactState, true, &texture->desc,
+                "Graph texture seed"))
+        {
+            return false;
+        }
+
+        if (!isValidGraphTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture seed range is empty or out of bounds");
+            return false;
+        }
+        subresources = subresources.resolve(texture->desc, false);
+        if (!isValidResolvedTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture seed range is empty or out of bounds");
+            return false;
+        }
+        if (isTextureRangeReleased(texture, subresources))
+        {
+            reportReleasedResourceUse("texture", texture->desc.debugName);
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping mapping = convertTextureState(
+            exactState.state, texture->desc, exactState.shaderStages);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                mapping.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph texture seed stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        bool sawUnknown = false;
+        bool sawKnown = false;
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                const ResourceStates tracked = m_StateTracker.getTextureSubresourceState(
+                    texture, arraySlice, mipLevel);
+                if (tracked == ResourceStates::Unknown)
+                {
+                    sawUnknown = true;
+                }
+                else
+                {
+                    sawKnown = true;
+                    if (tracked != exactState.state
+                        || m_StateTracker.getTextureSubresourceShaderStages(
+                            texture, arraySlice, mipLevel)
+                            != exactState.shaderStages)
+                    {
+                        m_Context.error("Graph texture seed does not match the exact tracked state and stages");
+                        return false;
+                    }
+                }
+            }
+        }
+        if (sawUnknown && sawKnown)
+        {
+            m_Context.error("Graph texture seed range mixes known and unknown subresources");
+            return false;
+        }
+        if (sawUnknown)
+        {
+            m_StateTracker.beginTrackingTextureState(
+                texture, subresources, exactState.state,
+                exactState.shaderStages);
+        }
+        m_CurrentCmdBuf->referencedResources.push_back(texture);
+        return true;
+    }
+
+    bool CommandList::ensureBufferStateTracked(
+        Buffer* buffer,
+        const GraphResourceState& exactState)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph buffer state must be ensured on an open command list");
+            return false;
+        }
+        if (!buffer || !buffer->belongsTo(m_Context))
+        {
+            m_Context.error("Graph buffer state buffer belongs to a different device");
+            return false;
+        }
+        if (!buffer->managed)
+        {
+            m_Context.error("Graph buffer state requires a Vulkan-managed buffer");
+            return false;
+        }
+        if (buffer->desc.keepInitialState)
+        {
+            m_Context.error("Graph buffer state buffers must disable keepInitialState");
+            return false;
+        }
+        if (buffer->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentBufferState(buffer))
+        {
+            m_Context.error("Graph buffer state cannot target a permanent-state buffer");
+            return false;
+        }
+        if (buffer->desc.isVolatile
+            || buffer->desc.cpuAccess != CpuAccessMode::None)
+        {
+            m_Context.error("Graph buffer state does not support volatile or CPU-visible buffers");
+            return false;
+        }
+        if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
+        {
+            reportReleasedResourceUse("buffer", buffer->desc.debugName);
+            return false;
+        }
+        if (!validateGraphState(
+                m_Context, exactState, false, nullptr,
+                "Graph buffer seed"))
+        {
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping mapping = convertResourceState(
+            exactState.state, false, false, false,
+            exactState.shaderStages);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                mapping.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph buffer seed stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        const ResourceStates tracked = m_StateTracker.getBufferState(buffer);
+        if (tracked == ResourceStates::Unknown)
+        {
+            m_StateTracker.beginTrackingBufferState(
+                buffer, exactState.state, exactState.shaderStages);
+            m_CurrentCmdBuf->referencedResources.push_back(buffer);
+            return true;
+        }
+        if (tracked != exactState.state
+            || m_StateTracker.getBufferShaderStages(buffer)
+                != exactState.shaderStages)
+        {
+            m_Context.error("Graph buffer seed does not match the exact tracked state and stages");
+            return false;
+        }
+        m_CurrentCmdBuf->referencedResources.push_back(buffer);
+        return true;
+    }
+
+    bool CommandList::recordTextureStateTransition(
+        Texture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceStateTransition& transition)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph texture transitions require an open command list");
+            return false;
+        }
+        if (!texture || !texture->belongsTo(m_Context))
+        {
+            m_Context.error("Graph texture transition texture belongs to a different device");
+            return false;
+        }
+        if (!texture->managed || texture->desc.keepInitialState)
+        {
+            m_Context.error("Graph texture transitions require a managed texture with keepInitialState disabled");
+            return false;
+        }
+        if (texture->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentTextureState(texture))
+        {
+            m_Context.error("Graph texture transition cannot target a permanent-state texture");
+            return false;
+        }
+        const GraphResourceState source {
+            transition.stateBefore, transition.shaderStagesBefore };
+        const GraphResourceState destination {
+            transition.stateAfter, transition.shaderStagesAfter };
+        if (!validateGraphState(
+                m_Context, source, true, &texture->desc,
+                "Graph texture transition source")
+            || !validateGraphState(
+                m_Context, destination, true, &texture->desc,
+                "Graph texture transition destination"))
+        {
+            return false;
+        }
+        if (transition.stateBefore == transition.stateAfter)
+        {
+            m_Context.error("Graph texture transition must change logical state");
+            return false;
+        }
+
+        if (!isValidGraphTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture transition range is empty or out of bounds");
+            return false;
+        }
+        subresources = subresources.resolve(texture->desc, false);
+        if (!isValidResolvedTextureRange(texture, subresources))
+        {
+            m_Context.error("Graph texture transition range is empty or out of bounds");
+            return false;
+        }
+        if (isTextureRangeReleased(texture, subresources))
+        {
+            reportReleasedResourceUse("texture", texture->desc.debugName);
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping after = convertTextureState(
+            transition.stateAfter, texture->desc,
+            transition.shaderStagesAfter);
+        if (after.imageLayout == vk::ImageLayout::eUndefined
+            || !recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                after.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph texture transition destination is unsupported by the recording queue family");
+            return false;
+        }
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                if (m_StateTracker.getTextureSubresourceState(
+                        texture, arraySlice, mipLevel)
+                        != transition.stateBefore
+                    || m_StateTracker.getTextureSubresourceShaderStages(
+                        texture, arraySlice, mipLevel)
+                        != transition.shaderStagesBefore)
+                {
+                    m_Context.error("Graph texture transition source does not match every exact tracked subresource state and stage scope");
+                    return false;
+                }
+                const ResourceStateMapping before = convertTextureState(
+                    transition.stateBefore, texture->desc,
+                    transition.shaderStagesBefore);
+                if (!detail::isWaitStageMaskSupported(
+                        before.stageFlags, recordingQueue->getQueueFlags()))
+                {
+                    m_Context.error("Graph texture transition source is unsupported by the recording queue family");
+                    return false;
+                }
+            }
+        }
+
+        bool overlapsPendingTransition = false;
+        for (const TextureBarrier& barrier : m_StateTracker.getTextureBarriers())
+        {
+            if (barrier.texture != texture)
+                continue;
+            if (barrier.entireTexture
+                || (barrier.mipLevel >= subresources.baseMipLevel
+                    && barrier.mipLevel
+                        < subresources.baseMipLevel + subresources.numMipLevels
+                    && barrier.arraySlice >= subresources.baseArraySlice
+                    && barrier.arraySlice
+                        < subresources.baseArraySlice + subresources.numArraySlices))
+            {
+                overlapsPendingTransition = true;
+                break;
+            }
+        }
+        if (overlapsPendingTransition)
+        {
+            endRenderPass();
+            commitBarriersInternal();
+        }
+
+        requireTextureState(
+            texture, subresources, transition.stateAfter,
+            transition.shaderStagesAfter, false);
+        for (ArraySlice arraySlice = subresources.baseArraySlice;
+             arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+             ++arraySlice)
+        {
+            for (MipLevel mipLevel = subresources.baseMipLevel;
+                 mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                 ++mipLevel)
+            {
+                if (m_StateTracker.getTextureSubresourceState(
+                        texture, arraySlice, mipLevel)
+                        != transition.stateAfter
+                    || m_StateTracker.getTextureSubresourceShaderStages(
+                        texture, arraySlice, mipLevel)
+                        != transition.shaderStagesAfter)
+                {
+                    m_Context.error("Graph texture transition did not produce its exact destination state and stages");
+                    return false;
+                }
+            }
+        }
+        m_CurrentCmdBuf->referencedResources.push_back(texture);
+        return true;
+    }
+
+    bool CommandList::recordBufferStateTransition(
+        Buffer* buffer,
+        const GraphResourceStateTransition& transition)
+    {
+        if (!m_IsRecording)
+        {
+            m_Context.error("Graph buffer transitions require an open command list");
+            return false;
+        }
+        if (!buffer || !buffer->belongsTo(m_Context))
+        {
+            m_Context.error("Graph buffer transition buffer belongs to a different device");
+            return false;
+        }
+        if (!buffer->managed || buffer->desc.keepInitialState)
+        {
+            m_Context.error("Graph buffer transitions require a managed buffer with keepInitialState disabled");
+            return false;
+        }
+        if (buffer->permanentState != ResourceStates::Unknown
+            || m_StateTracker.hasPendingPermanentBufferState(buffer))
+        {
+            m_Context.error("Graph buffer transition cannot target a permanent-state buffer");
+            return false;
+        }
+        if (buffer->desc.isVolatile
+            || buffer->desc.cpuAccess != CpuAccessMode::None)
+        {
+            m_Context.error("Graph buffer transition does not support volatile or CPU-visible buffers");
+            return false;
+        }
+        if (m_ReleasedBuffers.find(buffer) != m_ReleasedBuffers.end())
+        {
+            reportReleasedResourceUse("buffer", buffer->desc.debugName);
+            return false;
+        }
+        const GraphResourceState source {
+            transition.stateBefore, transition.shaderStagesBefore };
+        const GraphResourceState destination {
+            transition.stateAfter, transition.shaderStagesAfter };
+        if (!validateGraphState(
+                m_Context, source, false, nullptr,
+                "Graph buffer transition source")
+            || !validateGraphState(
+                m_Context, destination, false, nullptr,
+                "Graph buffer transition destination"))
+        {
+            return false;
+        }
+        if (transition.stateBefore == transition.stateAfter)
+        {
+            m_Context.error("Graph buffer transition must change logical state");
+            return false;
+        }
+        if (m_StateTracker.getBufferState(buffer) != transition.stateBefore
+            || m_StateTracker.getBufferShaderStages(buffer)
+                != transition.shaderStagesBefore)
+        {
+            m_Context.error("Graph buffer transition source does not match the exact tracked state and stages");
+            return false;
+        }
+
+        Queue* recordingQueue = m_Device->getQueue(m_CommandListParameters.queueType);
+        const ResourceStateMapping before = convertResourceState(
+            transition.stateBefore, false, false, false,
+            transition.shaderStagesBefore);
+        const ResourceStateMapping after = convertResourceState(
+            transition.stateAfter, false, false, false,
+            transition.shaderStagesAfter);
+        if (!recordingQueue
+            || !detail::isWaitStageMaskSupported(
+                before.stageFlags, recordingQueue->getQueueFlags())
+            || !detail::isWaitStageMaskSupported(
+                after.stageFlags, recordingQueue->getQueueFlags()))
+        {
+            m_Context.error("Graph buffer transition stage scope is unsupported by the recording queue family");
+            return false;
+        }
+
+        const bool overlapsPendingTransition = std::any_of(
+            m_StateTracker.getBufferBarriers().begin(),
+            m_StateTracker.getBufferBarriers().end(),
+            [buffer](const BufferBarrier& barrier) {
+                return barrier.buffer == buffer;
+            });
+        if (overlapsPendingTransition)
+        {
+            endRenderPass();
+            commitBarriersInternal();
+        }
+
+        requireBufferState(
+            buffer, transition.stateAfter,
+            transition.shaderStagesAfter);
+        if (m_StateTracker.getBufferState(buffer) != transition.stateAfter
+            || m_StateTracker.getBufferShaderStages(buffer)
+                != transition.shaderStagesAfter)
+        {
+            m_Context.error("Graph buffer transition did not produce its exact destination state and stages");
+            return false;
+        }
+        m_CurrentCmdBuf->referencedResources.push_back(buffer);
+        return true;
+    }
+
     bool Device::addTextureMemoryDependency(
         ICommandList* commandList,
         ITexture* texture,
@@ -1288,6 +1964,92 @@ namespace nvrhi::vulkan
         }
         return vulkanCommandList->recordBufferMemoryDependency(
             vulkanBuffer, dependency);
+    }
+
+    bool Device::ensureTextureStateTracked(
+        ICommandList* commandList,
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceState& exactState)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Texture* vulkanTexture = dynamic_cast<Texture*>(texture);
+        if (!vulkanCommandList || !vulkanTexture)
+        {
+            m_Context.error("Graph texture state requires Vulkan command-list and texture objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph texture state command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->ensureTextureStateTracked(
+            vulkanTexture, subresources, exactState);
+    }
+
+    bool Device::ensureBufferStateTracked(
+        ICommandList* commandList,
+        IBuffer* buffer,
+        const GraphResourceState& exactState)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Buffer* vulkanBuffer = dynamic_cast<Buffer*>(buffer);
+        if (!vulkanCommandList || !vulkanBuffer)
+        {
+            m_Context.error("Graph buffer state requires Vulkan command-list and buffer objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph buffer state command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->ensureBufferStateTracked(
+            vulkanBuffer, exactState);
+    }
+
+    bool Device::transitionTextureState(
+        ICommandList* commandList,
+        ITexture* texture,
+        TextureSubresourceSet subresources,
+        const GraphResourceStateTransition& transition)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Texture* vulkanTexture = dynamic_cast<Texture*>(texture);
+        if (!vulkanCommandList || !vulkanTexture)
+        {
+            m_Context.error("Graph texture transition requires Vulkan command-list and texture objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph texture transition command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->recordTextureStateTransition(
+            vulkanTexture, subresources, transition);
+    }
+
+    bool Device::transitionBufferState(
+        ICommandList* commandList,
+        IBuffer* buffer,
+        const GraphResourceStateTransition& transition)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Buffer* vulkanBuffer = dynamic_cast<Buffer*>(buffer);
+        if (!vulkanCommandList || !vulkanBuffer)
+        {
+            m_Context.error("Graph buffer transition requires Vulkan command-list and buffer objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error("Graph buffer transition command list belongs to a different device");
+            return false;
+        }
+        return vulkanCommandList->recordBufferStateTransition(
+            vulkanBuffer, transition);
     }
 
     void CommandList::beginTrackingTextureState(ITexture* _texture, TextureSubresourceSet subresources, ResourceStates stateBits)

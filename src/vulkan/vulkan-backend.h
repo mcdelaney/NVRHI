@@ -1372,6 +1372,20 @@ namespace nvrhi::vulkan
         bool addBufferMemoryDependency(
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) override;
+        bool ensureTextureStateTracked(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceState& exactState) override;
+        bool ensureBufferStateTracked(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceState& exactState) override;
+        bool transitionTextureState(
+            ICommandList* commandList, ITexture* texture,
+            TextureSubresourceSet subresources,
+            const GraphResourceStateTransition& transition) override;
+        bool transitionBufferState(
+            ICommandList* commandList, IBuffer* buffer,
+            const GraphResourceStateTransition& transition) override;
 
     private:
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
@@ -1425,6 +1439,16 @@ namespace nvrhi::vulkan
             const MemoryDependencyDesc& dependency);
         bool recordBufferMemoryDependency(
             Buffer* buffer, const MemoryDependencyDesc& dependency);
+        bool ensureTextureStateTracked(
+            Texture* texture, TextureSubresourceSet subresources,
+            const GraphResourceState& exactState);
+        bool ensureBufferStateTracked(
+            Buffer* buffer, const GraphResourceState& exactState);
+        bool recordTextureStateTransition(
+            Texture* texture, TextureSubresourceSet subresources,
+            const GraphResourceStateTransition& transition);
+        bool recordBufferStateTransition(
+            Buffer* buffer, const GraphResourceStateTransition& transition);
 
         // IResource implementation
 
@@ -1608,7 +1632,8 @@ namespace nvrhi::vulkan
         void updateRayTracingVolatileBuffers();
 
         void requireTextureState(ITexture* texture, TextureSubresourceSet subresources,
-            ResourceStates state, ShaderType shaderStages = ShaderType::All);
+            ResourceStates state, ShaderType shaderStages = ShaderType::All,
+            bool preserveReadOnlyDepthState = true);
         void requireBufferState(IBuffer* buffer, ResourceStates state,
             ShaderType shaderStages = ShaderType::All);
         bool isTextureRangeReleased(Texture* texture, TextureSubresourceSet subresources) const;
