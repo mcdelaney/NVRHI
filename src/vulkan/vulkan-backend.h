@@ -304,6 +304,10 @@ namespace nvrhi::vulkan
         // stolen by another submit on the same queue.
         uint64_t submitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
 
+        // Retry-aware draining submit. On a guaranteed-not-submitted failure,
+        // preserves the accumulator while removing per-call additions.
+        uint64_t trySubmitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras);
+
     private:
         struct PendingSemaphoreWait
         {
@@ -1342,6 +1346,10 @@ namespace nvrhi::vulkan
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) override;
         uint64_t executeCommandListsWithSyncDraining(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) override;
+        uint64_t tryExecuteCommandListsWithSyncDraining(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) override;

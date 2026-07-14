@@ -212,6 +212,18 @@ namespace nvrhi::vulkan
             CommandQueue executionQueue,
             const SubmitSyncExtras& extras) = 0;
 
+        // Retry-aware form of executeCommandListsWithSyncDraining. Returns 0
+        // only when Vulkan guarantees that nothing was submitted. In that
+        // case every command list remains closed and executable, and the
+        // queue accumulator is restored exactly to its pre-call contents;
+        // per-call extras and the internal tracking signal are not retained.
+        // Retry the same closed command lists and extras without re-queuing
+        // accumulator items. Device loss is conservatively treated as submitted.
+        virtual uint64_t tryExecuteCommandListsWithSyncDraining(
+            ICommandList* const* pCommandLists, size_t numCommandLists,
+            CommandQueue executionQueue,
+            const SubmitSyncExtras& extras) = 0;
+
         // Stage-aware variants for waits stored in the queue accumulator.
         // The existing methods remain conservative and use ALL_COMMANDS.
         virtual void queueWaitForSemaphoreAtStage(

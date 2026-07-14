@@ -61,6 +61,97 @@ namespace
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
+    PFN_vkQueueSubmit2 forwardQueueSubmit2 = nullptr;
+
+    struct QueueSubmit2Probe
+    {
+        bool failSubmission = false;
+        bool exact = true;
+        uint32_t calls = 0;
+        VkSemaphore accumulatorWait = VK_NULL_HANDLE;
+        VkSemaphore extraWait = VK_NULL_HANDLE;
+        VkSemaphore accumulatorSignal = VK_NULL_HANDLE;
+        VkSemaphore extraSignal = VK_NULL_HANDLE;
+        VkSemaphore trackingSignal = VK_NULL_HANDLE;
+        uint64_t trackingValue = 0;
+    } queueSubmit2Probe;
+
+    uint32_t countSemaphoreInfo(
+        const VkSemaphoreSubmitInfo* infos,
+        uint32_t count,
+        VkSemaphore semaphore,
+        uint64_t value,
+        VkPipelineStageFlags2 stageMask)
+    {
+        uint32_t matches = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            if (infos[i].semaphore == semaphore
+                && infos[i].value == value
+                && infos[i].stageMask == stageMask)
+            {
+                ++matches;
+            }
+        }
+        return matches;
+    }
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeQueueSubmit2(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo2* submits,
+        VkFence fence)
+    {
+        ++queueSubmit2Probe.calls;
+        bool exact = submitCount == 1 && submits != nullptr;
+        if (exact)
+        {
+            const VkSubmitInfo2& submit = submits[0];
+            exact = submit.commandBufferInfoCount == 1
+                && submit.pCommandBufferInfos != nullptr
+                && submit.waitSemaphoreInfoCount == 2
+                && submit.pWaitSemaphoreInfos != nullptr
+                && submit.signalSemaphoreInfoCount == 3
+                && submit.pSignalSemaphoreInfos != nullptr
+                && countSemaphoreInfo(
+                    submit.pWaitSemaphoreInfos,
+                    submit.waitSemaphoreInfoCount,
+                    queueSubmit2Probe.accumulatorWait,
+                    1,
+                    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT) == 1
+                && countSemaphoreInfo(
+                    submit.pWaitSemaphoreInfos,
+                    submit.waitSemaphoreInfoCount,
+                    queueSubmit2Probe.extraWait,
+                    1,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT) == 1
+                && countSemaphoreInfo(
+                    submit.pSignalSemaphoreInfos,
+                    submit.signalSemaphoreInfoCount,
+                    queueSubmit2Probe.accumulatorSignal,
+                    1,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == 1
+                && countSemaphoreInfo(
+                    submit.pSignalSemaphoreInfos,
+                    submit.signalSemaphoreInfoCount,
+                    queueSubmit2Probe.extraSignal,
+                    1,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == 1
+                && countSemaphoreInfo(
+                    submit.pSignalSemaphoreInfos,
+                    submit.signalSemaphoreInfoCount,
+                    queueSubmit2Probe.trackingSignal,
+                    queueSubmit2Probe.trackingValue,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == 1;
+        }
+        queueSubmit2Probe.exact &= exact;
+
+        if (queueSubmit2Probe.failSubmission)
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+        return forwardQueueSubmit2(queue, submitCount, submits, fence);
+    }
+
     PFN_vkDeviceWaitIdle realDeviceWaitIdle = nullptr;
     std::mutex* waitIdleQueueMutex = nullptr;
     bool waitIdleObservedQueueLock = false;
@@ -717,7 +808,7 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 29
+            mappingPassed &= nvrhi::c_HeaderVersion == 30
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
@@ -1926,6 +2017,104 @@ int main()
         vkDevice,
         device->getQueueSemaphore(nvrhi::CommandQueue::Graphics),
         retrySubmitId);
+
+    // A retry-aware draining submit must preserve the pre-call accumulator on
+    // a guaranteed-not-submitted failure while removing the per-call extras
+    // and tracking signal it appended. Probe both attempts at vkQueueSubmit2:
+    // each semaphore must appear exactly once on the exact retry.
+    VkSemaphore drainingAccumulatorGate = timeline(1);
+    VkSemaphore drainingExtraGate = timeline(1);
+    VkSemaphore drainingAccumulatorSignal = timeline();
+    VkSemaphore drainingExtraSignal = timeline();
+    device->queueWaitForSemaphoreAtStage(
+        nvrhi::CommandQueue::Graphics,
+        drainingAccumulatorGate,
+        1,
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT);
+    device->queueSignalSemaphore(
+        nvrhi::CommandQueue::Graphics,
+        drainingAccumulatorSignal,
+        1);
+
+    nvrhi::vulkan::SubmitSyncExtras drainingFailureExtras {};
+    const uint64_t drainingExtraWaitValue = 1;
+    const uint64_t drainingExtraSignalValue = 1;
+    const VkPipelineStageFlags2 drainingExtraWaitStage =
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    drainingFailureExtras.waitSemaphores = &drainingExtraGate;
+    drainingFailureExtras.waitValues = &drainingExtraWaitValue;
+    drainingFailureExtras.waitStageMasks = &drainingExtraWaitStage;
+    drainingFailureExtras.numWaits = 1;
+    drainingFailureExtras.signalSemaphores = &drainingExtraSignal;
+    drainingFailureExtras.signalValues = &drainingExtraSignalValue;
+    drainingFailureExtras.numSignals = 1;
+
+    nvrhi::CommandListHandle drainingFailureProbe = device->createCommandList(
+        nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Graphics));
+    drainingFailureProbe->open();
+    drainingFailureProbe->close();
+    auto* drainingFailureProbeVk =
+        static_cast<nvrhi::vulkan::CommandList*>(drainingFailureProbe.Get());
+    const nvrhi::vulkan::TrackedCommandBuffer* drainingFailureProbeBuffer =
+        drainingFailureProbeVk->getCurrentCmdBuf().get();
+    nvrhi::ICommandList* drainingFailureProbePtr = drainingFailureProbe.Get();
+
+    const uint64_t beforeFailedDrainingSubmit =
+        graphicsQueue->getLastSubmittedID();
+    const uint32_t errorsBeforeFailedDrainingSubmit = messageCallback.errors;
+    queueSubmit2Probe = {};
+    queueSubmit2Probe.failSubmission = true;
+    queueSubmit2Probe.accumulatorWait = drainingAccumulatorGate;
+    queueSubmit2Probe.extraWait = drainingExtraGate;
+    queueSubmit2Probe.accumulatorSignal = drainingAccumulatorSignal;
+    queueSubmit2Probe.extraSignal = drainingExtraSignal;
+    queueSubmit2Probe.trackingSignal = graphicsTracking;
+    queueSubmit2Probe.trackingValue = beforeFailedDrainingSubmit + 1;
+    forwardQueueSubmit2 = realQueueSubmit2;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = probeQueueSubmit2;
+
+    const uint64_t failedDrainingSubmitId =
+        device->tryExecuteCommandListsWithSyncDraining(
+            &drainingFailureProbePtr,
+            1,
+            nvrhi::CommandQueue::Graphics,
+            drainingFailureExtras);
+    const bool drainingSafeFailurePassed = failedDrainingSubmitId == 0
+        && graphicsQueue->getLastSubmittedID() == beforeFailedDrainingSubmit
+        && drainingFailureProbeVk->getCurrentCmdBuf().get()
+            == drainingFailureProbeBuffer
+        && timelineValue(vkDevice, drainingAccumulatorSignal) == 0
+        && timelineValue(vkDevice, drainingExtraSignal) == 0
+        && queueSubmit2Probe.calls == 1
+        && queueSubmit2Probe.exact
+        && messageCallback.errors == errorsBeforeFailedDrainingSubmit + 1;
+    passed &= drainingSafeFailurePassed;
+    if (!drainingSafeFailurePassed)
+        std::cerr << "Retry-aware draining safe-failure retention test failed\n";
+    messageCallback.errors = errorsBeforeFailedDrainingSubmit;
+
+    queueSubmit2Probe.failSubmission = false;
+    const uint64_t retryDrainingSubmitId =
+        device->tryExecuteCommandListsWithSyncDraining(
+            &drainingFailureProbePtr,
+            1,
+            nvrhi::CommandQueue::Graphics,
+            drainingFailureExtras);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = realQueueSubmit2;
+    forwardQueueSubmit2 = nullptr;
+
+    const bool drainingRetryPassed =
+        retryDrainingSubmitId == beforeFailedDrainingSubmit + 1
+        && drainingFailureProbeVk->getCurrentCmdBuf() == nullptr
+        && queueSubmit2Probe.calls == 2
+        && queueSubmit2Probe.exact
+        && waitTimeline(vkDevice, drainingAccumulatorSignal, 1)
+        && waitTimeline(vkDevice, drainingExtraSignal, 1)
+        && waitTimeline(vkDevice, graphicsTracking, retryDrainingSubmitId)
+        && messageCallback.errors == errorsBeforeFailedDrainingSubmit;
+    passed &= drainingRetryPassed;
+    if (!drainingRetryPassed)
+        std::cerr << "Retry-aware draining exact-retry test failed\n";
 
     VkSemaphore aliasCompletion = timeline();
     auto signalOnQueue = [&](nvrhi::CommandQueue queueType, uint64_t value) {

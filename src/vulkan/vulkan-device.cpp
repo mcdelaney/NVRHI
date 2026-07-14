@@ -831,6 +831,25 @@ namespace nvrhi::vulkan
         return submissionID;
     }
 
+    uint64_t Device::tryExecuteCommandListsWithSyncDraining(
+        ICommandList* const* pCommandLists, size_t numCommandLists,
+        CommandQueue executionQueue,
+        const SubmitSyncExtras& extras)
+    {
+        Queue& queue = *m_Queues[uint32_t(executionQueue)];
+
+        uint64_t submissionID = queue.trySubmitWithSyncDraining(
+            pCommandLists, numCommandLists, extras);
+
+        for (size_t i = 0; submissionID != 0 && i < numCommandLists; i++)
+        {
+            checked_cast<CommandList*>(pCommandLists[i])->executed(
+                queue, executionQueue, submissionID);
+        }
+
+        return submissionID;
+    }
+
     void Device::getTextureTiling(ITexture* _texture, uint32_t* numTiles, PackedMipDesc* desc, TileShape* tileShape, uint32_t* subresourceTilingsNum, SubresourceTiling* subresourceTilings)
     {
         Texture* texture = checked_cast<Texture*>(_texture);

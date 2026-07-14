@@ -171,6 +171,12 @@ namespace nvrhi::vulkan
         return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/true);
     }
 
+    uint64_t Queue::trySubmitWithSyncDraining(ICommandList* const* ppCmd, size_t numCmd, const SubmitSyncExtras& extras)
+    {
+        return submitImpl(ppCmd, numCmd, &extras, /*drainAccumulator=*/true,
+            /*reportSafeFailure=*/true);
+    }
+
     uint64_t Queue::submitImpl(ICommandList* const* ppCmd, size_t numCmd,
         const SubmitSyncExtras* extras, bool drainAccumulator,
         bool reportSafeFailure)
@@ -188,6 +194,14 @@ namespace nvrhi::vulkan
         //      same m_LastSubmittedID and signal the trackingSemaphore at
         //      duplicate values (validator VUID-VkSubmitInfo-pSignalSemaphores-03242).
         std::lock_guard lockGuard(m_Mutex);
+
+        // A retry-aware draining submit appends its extras and tracking signal
+        // directly to the accumulator vectors. Remember their original sizes
+        // so a guaranteed-not-submitted failure can remove only those additions
+        // and leave the caller's queued waits/signals intact and ordered.
+        const size_t originalAccumulatorWaitCount = m_WaitSemaphores.size();
+        const size_t originalAccumulatorSignalCount = m_SignalSemaphores.size();
+        assert(m_SignalSemaphores.size() == m_SignalSemaphoreValues.size());
 
         // Decide which wait/signal sources to use:
         //   drainAccumulator = true (default submit): use the queue's
@@ -327,15 +341,23 @@ namespace nvrhi::vulkan
             submitSucceeded = false;
         }
 
+        if (!submitSucceeded)
+        {
+            if (drainAccumulator)
+            {
+                m_WaitSemaphores.resize(originalAccumulatorWaitCount);
+                m_SignalSemaphores.resize(originalAccumulatorSignalCount);
+                m_SignalSemaphoreValues.resize(originalAccumulatorSignalCount);
+            }
+            return 0;
+        }
+
         if (drainAccumulator)
         {
             m_WaitSemaphores.clear();
             m_SignalSemaphores.clear();
             m_SignalSemaphoreValues.clear();
         }
-
-        if (!submitSucceeded)
-            return 0;
 
         m_LastSubmittedID.store(submissionID, std::memory_order_relaxed);
         for (size_t i = 0; i < numCmd; i++)
