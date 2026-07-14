@@ -923,6 +923,12 @@ namespace nvrhi::vulkan
             m_Context.error("Queue ownership release requires Vulkan command-list and texture objects");
             return false;
         }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Queue ownership release command list belongs to a different device");
+            return false;
+        }
         return vulkanCommandList->recordTextureQueueOwnershipTransfer(
             vulkanTexture, subresources, transfer, true);
     }
@@ -937,6 +943,12 @@ namespace nvrhi::vulkan
         if (!vulkanCommandList || !vulkanTexture)
         {
             m_Context.error("Queue ownership acquire requires Vulkan command-list and texture objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Queue ownership acquire command list belongs to a different device");
             return false;
         }
         return vulkanCommandList->recordTextureQueueOwnershipTransfer(
@@ -954,6 +966,12 @@ namespace nvrhi::vulkan
             m_Context.error("Queue ownership release requires Vulkan command-list and buffer objects");
             return false;
         }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Queue ownership release command list belongs to a different device");
+            return false;
+        }
         return vulkanCommandList->recordBufferQueueOwnershipTransfer(
             vulkanBuffer, transfer, true);
     }
@@ -967,6 +985,12 @@ namespace nvrhi::vulkan
         if (!vulkanCommandList || !vulkanBuffer)
         {
             m_Context.error("Queue ownership acquire requires Vulkan command-list and buffer objects");
+            return false;
+        }
+        if (vulkanCommandList->getDevice() != this)
+        {
+            m_Context.error(
+                "Queue ownership acquire command list belongs to a different device");
             return false;
         }
         return vulkanCommandList->recordBufferQueueOwnershipTransfer(
