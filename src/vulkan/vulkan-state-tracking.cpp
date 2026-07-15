@@ -1829,11 +1829,18 @@ namespace nvrhi::vulkan
             m_Context.error("Graph buffer verification requires the tracked state to be known");
             return false;
         }
+        const ShaderType trackedShaderStages =
+            m_StateTracker.getBufferShaderStages(buffer);
         if (tracked != exactState.state
-            || m_StateTracker.getBufferShaderStages(buffer)
-                != exactState.shaderStages)
+            || trackedShaderStages != exactState.shaderStages)
         {
-            m_Context.error("Graph buffer verification does not match the exact tracked state and stage scope");
+            m_Context.error(
+                "Graph buffer verification mismatch for '"
+                + buffer->desc.debugName
+                + "': tracked state=" + std::to_string(uint32_t(tracked))
+                + " stages=" + std::to_string(uint32_t(trackedShaderStages))
+                + ", expected state=" + std::to_string(uint32_t(exactState.state))
+                + " stages=" + std::to_string(uint32_t(exactState.shaderStages)));
             return false;
         }
 
