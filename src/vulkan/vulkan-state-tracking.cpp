@@ -824,16 +824,6 @@ namespace nvrhi::vulkan
                 .setSubresourceRange(subresourceRange));
         }
 
-        if (!imageBarriers.empty())
-        {
-            vk::DependencyInfo dep_info;
-            dep_info.setImageMemoryBarriers(imageBarriers);
-
-            m_CurrentCmdBuf->cmdBuf.pipelineBarrier2(dep_info);
-        }
-
-        imageBarriers.clear();
-
         for (const BufferBarrier& barrier : m_StateTracker.getBufferBarriers())
         {
             ResourceStateMapping before = convertResourceState(
@@ -857,14 +847,14 @@ namespace nvrhi::vulkan
                 .setSize(buffer->desc.byteSize));
         }
 
-        if (!bufferBarriers.empty())
+        if (!imageBarriers.empty() || !bufferBarriers.empty())
         {
             vk::DependencyInfo dep_info;
+            dep_info.setImageMemoryBarriers(imageBarriers);
             dep_info.setBufferMemoryBarriers(bufferBarriers);
 
             m_CurrentCmdBuf->cmdBuf.pipelineBarrier2(dep_info);
         }
-        bufferBarriers.clear();
 
         m_StateTracker.clearBarriers();
         m_PendingBarriersAreMemoryDependencies = false;
