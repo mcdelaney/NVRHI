@@ -321,6 +321,11 @@ namespace nvrhi::vulkan
             m_CurrentCmdBuf->referencedResources.push_back(state.indirectParams);
         }
 
+        if (state.indirectCountBuffer && state.indirectCountBuffer != state.indirectParams)
+        {
+            m_CurrentCmdBuf->referencedResources.push_back(state.indirectCountBuffer);
+        }
+
         m_CurrentComputeState = ComputeState();
         m_CurrentGraphicsState = GraphicsState();
         m_CurrentMeshletState = state;

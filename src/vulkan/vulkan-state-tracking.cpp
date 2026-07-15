@@ -593,6 +593,14 @@ namespace nvrhi::vulkan
             requireBufferState(state.indirectParams, ResourceStates::IndirectArgument);
         }
 
+        if (state.indirectCountBuffer
+            && state.indirectCountBuffer != state.indirectParams
+            && (m_BindingStatesDirty
+                || state.indirectCountBuffer != m_CurrentGraphicsState.indirectCountBuffer))
+        {
+            requireBufferState(state.indirectCountBuffer, ResourceStates::IndirectArgument);
+        }
+
         m_BindingStatesDirty = false;
     }
 
@@ -636,6 +644,14 @@ namespace nvrhi::vulkan
         if (state.indirectParams && (m_BindingStatesDirty || state.indirectParams != m_CurrentMeshletState.indirectParams))
         {
             requireBufferState(state.indirectParams, ResourceStates::IndirectArgument);
+        }
+
+        if (state.indirectCountBuffer
+            && state.indirectCountBuffer != state.indirectParams
+            && (m_BindingStatesDirty
+                || state.indirectCountBuffer != m_CurrentMeshletState.indirectCountBuffer))
+        {
+            requireBufferState(state.indirectCountBuffer, ResourceStates::IndirectArgument);
         }
 
         m_BindingStatesDirty = false;
