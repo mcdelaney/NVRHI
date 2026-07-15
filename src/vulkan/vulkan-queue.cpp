@@ -238,6 +238,54 @@ namespace nvrhi::vulkan
             signalSemaphoreValues = &localSignalSemaphoreValues;
         }
 
+        // Some synchronization tools reconstruct a submit's predecessor set
+        // from explicit semaphore waits and do not preserve implicit queue
+        // order after processing special waits such as swapchain acquire. Make
+        // the exact current queue frontier explicit while m_Mutex prevents a
+        // getter-to-submit race. Insert it before per-submit waits so callers
+        // retain full control of their ordering (notably acquire-last).
+        size_t frontierWaitIndex = 0;
+        bool hasFrontierWait = false;
+        bool modifiedOriginalAccumulatorWait = false;
+        PendingSemaphoreWait originalAccumulatorFrontierWait {};
+        if (extras && extras->waitForCurrentQueueFrontier)
+        {
+            const uint64_t frontier =
+                m_LastSubmittedID.load(std::memory_order_relaxed);
+            if (frontier != 0)
+            {
+                const auto existing = std::find_if(
+                    waitSemaphores->begin(), waitSemaphores->end(),
+                    [this](const PendingSemaphoreWait& wait) {
+                        return wait.semaphore == trackingSemaphore;
+                    });
+                if (existing != waitSemaphores->end())
+                {
+                    frontierWaitIndex = size_t(
+                        std::distance(waitSemaphores->begin(), existing));
+                    hasFrontierWait = true;
+                    if (drainAccumulator
+                        && frontierWaitIndex < originalAccumulatorWaitCount)
+                    {
+                        originalAccumulatorFrontierWait = *existing;
+                        modifiedOriginalAccumulatorWait = true;
+                    }
+                    existing->value = std::max(existing->value, frontier);
+                    existing->stageMask |=
+                        vk::PipelineStageFlagBits2::eAllCommands;
+                }
+                else
+                {
+                    frontierWaitIndex = waitSemaphores->size();
+                    hasFrontierWait = true;
+                    waitSemaphores->push_back(PendingSemaphoreWait {
+                        trackingSemaphore,
+                        frontier,
+                        vk::PipelineStageFlagBits2::eAllCommands });
+                }
+            }
+        }
+
         if (extras)
         {
             assert(extras->numWaits == 0 || extras->waitSemaphores != nullptr);
@@ -248,8 +296,19 @@ namespace nvrhi::vulkan
                     extras->waitStageMasks
                         ? vk::PipelineStageFlags2(extras->waitStageMasks[i])
                         : vk::PipelineStageFlagBits2::eAllCommands);
+                const vk::Semaphore semaphore(extras->waitSemaphores[i]);
+                if (hasFrontierWait && semaphore == trackingSemaphore)
+                {
+                    PendingSemaphoreWait& frontierWait =
+                        (*waitSemaphores)[frontierWaitIndex];
+                    frontierWait.value = std::max(
+                        frontierWait.value,
+                        extras->waitValues ? extras->waitValues[i] : 0ull);
+                    frontierWait.stageMask |= stageMask;
+                    continue;
+                }
                 waitSemaphores->push_back(PendingSemaphoreWait{
-                    vk::Semaphore(extras->waitSemaphores[i]),
+                    semaphore,
                     extras->waitValues ? extras->waitValues[i] : 0ull,
                     stageMask });
             }
@@ -345,6 +404,11 @@ namespace nvrhi::vulkan
         {
             if (drainAccumulator)
             {
+                if (modifiedOriginalAccumulatorWait)
+                {
+                    m_WaitSemaphores[frontierWaitIndex] =
+                        originalAccumulatorFrontierWait;
+                }
                 m_WaitSemaphores.resize(originalAccumulatorWaitCount);
                 m_SignalSemaphores.resize(originalAccumulatorSignalCount);
                 m_SignalSemaphoreValues.resize(originalAccumulatorSignalCount);

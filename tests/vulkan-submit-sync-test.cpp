@@ -73,8 +73,24 @@ namespace
         VkSemaphore accumulatorSignal = VK_NULL_HANDLE;
         VkSemaphore extraSignal = VK_NULL_HANDLE;
         VkSemaphore trackingSignal = VK_NULL_HANDLE;
+        uint64_t trackingWaitValue = 0;
         uint64_t trackingValue = 0;
     } queueSubmit2Probe;
+
+    struct DuplicateTrackingWaitProbe
+    {
+        PFN_vkQueueSubmit2 forward = nullptr;
+        bool failSubmission = false;
+        bool allExact = true;
+        uint32_t calls = 0;
+        VkSemaphore trackingSemaphore = VK_NULL_HANDLE;
+        VkSemaphore extraWait = VK_NULL_HANDLE;
+        uint64_t expectedTrackingWaitValue = 0;
+        VkPipelineStageFlags2 expectedTrackingWaitStage = 0;
+        uint64_t extraWaitValue = 0;
+        VkPipelineStageFlags2 extraWaitStage = 0;
+        uint64_t expectedTrackingSignalValue = 0;
+    } duplicateTrackingWaitProbe;
 
     uint32_t countSemaphoreInfo(
         const VkSemaphoreSubmitInfo* infos,
@@ -109,7 +125,7 @@ namespace
             const VkSubmitInfo2& submit = submits[0];
             exact = submit.commandBufferInfoCount == 1
                 && submit.pCommandBufferInfos != nullptr
-                && submit.waitSemaphoreInfoCount == 2
+                && submit.waitSemaphoreInfoCount == 3
                 && submit.pWaitSemaphoreInfos != nullptr
                 && submit.signalSemaphoreInfoCount == 3
                 && submit.pSignalSemaphoreInfos != nullptr
@@ -125,6 +141,18 @@ namespace
                     queueSubmit2Probe.extraWait,
                     1,
                     VK_PIPELINE_STAGE_2_TRANSFER_BIT) == 1
+                && countSemaphoreInfo(
+                    submit.pWaitSemaphoreInfos,
+                    submit.waitSemaphoreInfoCount,
+                    queueSubmit2Probe.trackingSignal,
+                    queueSubmit2Probe.trackingWaitValue,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == 1
+                && submit.pWaitSemaphoreInfos[0].semaphore
+                    == queueSubmit2Probe.accumulatorWait
+                && submit.pWaitSemaphoreInfos[1].semaphore
+                    == queueSubmit2Probe.trackingSignal
+                && submit.pWaitSemaphoreInfos[2].semaphore
+                    == queueSubmit2Probe.extraWait
                 && countSemaphoreInfo(
                     submit.pSignalSemaphoreInfos,
                     submit.signalSemaphoreInfoCount,
@@ -150,6 +178,49 @@ namespace
             return VK_ERROR_OUT_OF_HOST_MEMORY;
 
         return forwardQueueSubmit2(queue, submitCount, submits, fence);
+    }
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeDuplicateTrackingWaitQueueSubmit2(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo2* submits,
+        VkFence fence)
+    {
+        ++duplicateTrackingWaitProbe.calls;
+        bool exact = submitCount == 1 && submits != nullptr;
+        if (exact)
+        {
+            const VkSubmitInfo2& submit = submits[0];
+            exact = submit.commandBufferInfoCount == 1
+                && submit.pCommandBufferInfos != nullptr
+                && submit.waitSemaphoreInfoCount == 2
+                && submit.pWaitSemaphoreInfos != nullptr
+                && submit.signalSemaphoreInfoCount == 1
+                && submit.pSignalSemaphoreInfos != nullptr
+                && submit.pWaitSemaphoreInfos[0].semaphore
+                    == duplicateTrackingWaitProbe.trackingSemaphore
+                && submit.pWaitSemaphoreInfos[0].value
+                    == duplicateTrackingWaitProbe.expectedTrackingWaitValue
+                && submit.pWaitSemaphoreInfos[0].stageMask
+                    == duplicateTrackingWaitProbe.expectedTrackingWaitStage
+                && submit.pWaitSemaphoreInfos[1].semaphore
+                    == duplicateTrackingWaitProbe.extraWait
+                && submit.pWaitSemaphoreInfos[1].value
+                    == duplicateTrackingWaitProbe.extraWaitValue
+                && submit.pWaitSemaphoreInfos[1].stageMask
+                    == duplicateTrackingWaitProbe.extraWaitStage
+                && submit.pSignalSemaphoreInfos[0].semaphore
+                    == duplicateTrackingWaitProbe.trackingSemaphore
+                && submit.pSignalSemaphoreInfos[0].value
+                    == duplicateTrackingWaitProbe.expectedTrackingSignalValue
+                && submit.pSignalSemaphoreInfos[0].stageMask
+                    == VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        }
+        duplicateTrackingWaitProbe.allExact &= exact;
+        if (duplicateTrackingWaitProbe.failSubmission)
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        return duplicateTrackingWaitProbe.forward(
+            queue, submitCount, submits, fence);
     }
 
     PFN_vkDeviceWaitIdle realDeviceWaitIdle = nullptr;
@@ -808,7 +879,7 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 31
+            mappingPassed &= nvrhi::c_HeaderVersion == 32
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown
@@ -2048,6 +2119,7 @@ int main()
     drainingFailureExtras.signalSemaphores = &drainingExtraSignal;
     drainingFailureExtras.signalValues = &drainingExtraSignalValue;
     drainingFailureExtras.numSignals = 1;
+    drainingFailureExtras.waitForCurrentQueueFrontier = true;
 
     nvrhi::CommandListHandle drainingFailureProbe = device->createCommandList(
         nvrhi::CommandListParameters().setQueueType(nvrhi::CommandQueue::Graphics));
@@ -2069,6 +2141,7 @@ int main()
     queueSubmit2Probe.accumulatorSignal = drainingAccumulatorSignal;
     queueSubmit2Probe.extraSignal = drainingExtraSignal;
     queueSubmit2Probe.trackingSignal = graphicsTracking;
+    queueSubmit2Probe.trackingWaitValue = beforeFailedDrainingSubmit;
     queueSubmit2Probe.trackingValue = beforeFailedDrainingSubmit + 1;
     forwardQueueSubmit2 = realQueueSubmit2;
     VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = probeQueueSubmit2;
@@ -2115,6 +2188,149 @@ int main()
     passed &= drainingRetryPassed;
     if (!drainingRetryPassed)
         std::cerr << "Retry-aware draining exact-retry test failed\n";
+
+    // If the accumulator already waits on the queue's own tracking timeline,
+    // the explicit-frontier option must merge into that entry rather than emit
+    // a duplicate VkSemaphoreSubmitInfo. A guaranteed-not-submitted failure
+    // must also restore the accumulator's original value and stage mask before
+    // the exact command list is retried.
+    const uint64_t duplicateTrackingFrontier =
+        graphicsQueue->getLastSubmittedID();
+    passed &= duplicateTrackingFrontier > 1;
+    const uint64_t duplicateTrackingOriginalValue =
+        duplicateTrackingFrontier - 1;
+    const VkPipelineStageFlags2 duplicateTrackingOriginalStage =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+    const VkPipelineStageFlags2 duplicateTrackingMergedStage =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+        | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    device->queueWaitForSemaphoreAtStage(
+        nvrhi::CommandQueue::Graphics,
+        graphicsTracking,
+        duplicateTrackingOriginalValue,
+        duplicateTrackingOriginalStage);
+
+    VkSemaphore duplicateTrackingExtraGate = timeline(1);
+    const uint64_t duplicateTrackingExtraValue = 1;
+    const VkPipelineStageFlags2 duplicateTrackingExtraStage =
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    nvrhi::vulkan::SubmitSyncExtras duplicateTrackingExtras {};
+    duplicateTrackingExtras.waitSemaphores = &duplicateTrackingExtraGate;
+    duplicateTrackingExtras.waitValues = &duplicateTrackingExtraValue;
+    duplicateTrackingExtras.waitStageMasks = &duplicateTrackingExtraStage;
+    duplicateTrackingExtras.numWaits = 1;
+    duplicateTrackingExtras.waitForCurrentQueueFrontier = true;
+
+    nvrhi::CommandListHandle duplicateTrackingCommandList =
+        device->createCommandList(
+            nvrhi::CommandListParameters().setQueueType(
+                nvrhi::CommandQueue::Graphics));
+    duplicateTrackingCommandList->open();
+    duplicateTrackingCommandList->close();
+    auto* duplicateTrackingCommandListVk =
+        static_cast<nvrhi::vulkan::CommandList*>(
+            duplicateTrackingCommandList.Get());
+    const nvrhi::vulkan::TrackedCommandBuffer*
+        duplicateTrackingCommandBuffer =
+            duplicateTrackingCommandListVk->getCurrentCmdBuf().get();
+    nvrhi::ICommandList* duplicateTrackingCommandListPtr =
+        duplicateTrackingCommandList.Get();
+
+    duplicateTrackingWaitProbe = {};
+    duplicateTrackingWaitProbe.forward = realQueueSubmit2;
+    duplicateTrackingWaitProbe.trackingSemaphore = graphicsTracking;
+    duplicateTrackingWaitProbe.extraWait = duplicateTrackingExtraGate;
+    duplicateTrackingWaitProbe.extraWaitValue =
+        duplicateTrackingExtraValue;
+    duplicateTrackingWaitProbe.extraWaitStage =
+        duplicateTrackingExtraStage;
+    duplicateTrackingWaitProbe.expectedTrackingSignalValue =
+        duplicateTrackingFrontier + 1;
+    const auto setDuplicateTrackingExpectation = [=](
+        const bool fail,
+        const uint64_t waitValue,
+        const VkPipelineStageFlags2 waitStage) {
+        duplicateTrackingWaitProbe.failSubmission = fail;
+        duplicateTrackingWaitProbe.expectedTrackingWaitValue = waitValue;
+        duplicateTrackingWaitProbe.expectedTrackingWaitStage = waitStage;
+    };
+
+    const uint32_t errorsBeforeDuplicateTracking = messageCallback.errors;
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 =
+        probeDuplicateTrackingWaitQueueSubmit2;
+
+    setDuplicateTrackingExpectation(
+        true,
+        duplicateTrackingFrontier,
+        duplicateTrackingMergedStage);
+    const uint64_t failedDuplicateTrackingSubmitId =
+        device->tryExecuteCommandListsWithSyncDraining(
+            &duplicateTrackingCommandListPtr,
+            1,
+            nvrhi::CommandQueue::Graphics,
+            duplicateTrackingExtras);
+    const bool duplicateTrackingFirstFailurePassed =
+        failedDuplicateTrackingSubmitId == 0
+        && graphicsQueue->getLastSubmittedID() == duplicateTrackingFrontier
+        && duplicateTrackingCommandListVk->getCurrentCmdBuf().get()
+            == duplicateTrackingCommandBuffer
+        && duplicateTrackingWaitProbe.calls == 1
+        && duplicateTrackingWaitProbe.allExact;
+
+    // Disable frontier injection for one failed retry. The emitted accumulator
+    // wait must expose the original value/stage, proving the first failure
+    // rolled back its in-place merge rather than retaining the widened entry.
+    duplicateTrackingExtras.waitForCurrentQueueFrontier = false;
+    setDuplicateTrackingExpectation(
+        true,
+        duplicateTrackingOriginalValue,
+        duplicateTrackingOriginalStage);
+    const uint64_t failedDuplicateTrackingRestoreProbeId =
+        device->tryExecuteCommandListsWithSyncDraining(
+            &duplicateTrackingCommandListPtr,
+            1,
+            nvrhi::CommandQueue::Graphics,
+            duplicateTrackingExtras);
+    const bool duplicateTrackingRestorePassed =
+        failedDuplicateTrackingRestoreProbeId == 0
+        && graphicsQueue->getLastSubmittedID() == duplicateTrackingFrontier
+        && duplicateTrackingCommandListVk->getCurrentCmdBuf().get()
+            == duplicateTrackingCommandBuffer
+        && duplicateTrackingWaitProbe.calls == 2
+        && duplicateTrackingWaitProbe.allExact;
+
+    duplicateTrackingExtras.waitForCurrentQueueFrontier = true;
+    setDuplicateTrackingExpectation(
+        false,
+        duplicateTrackingFrontier,
+        duplicateTrackingMergedStage);
+    const uint64_t duplicateTrackingRetrySubmitId =
+        device->tryExecuteCommandListsWithSyncDraining(
+            &duplicateTrackingCommandListPtr,
+            1,
+            nvrhi::CommandQueue::Graphics,
+            duplicateTrackingExtras);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit2 = realQueueSubmit2;
+
+    const bool duplicateTrackingRetryPassed =
+        duplicateTrackingRetrySubmitId == duplicateTrackingFrontier + 1
+        && duplicateTrackingCommandListVk->getCurrentCmdBuf() == nullptr
+        && duplicateTrackingWaitProbe.calls == 3
+        && duplicateTrackingWaitProbe.allExact
+        && waitTimeline(
+            vkDevice, graphicsTracking, duplicateTrackingRetrySubmitId)
+        && messageCallback.errors == errorsBeforeDuplicateTracking + 2;
+    const bool duplicateTrackingPassed =
+        duplicateTrackingFirstFailurePassed
+        && duplicateTrackingRestorePassed
+        && duplicateTrackingRetryPassed;
+    passed &= duplicateTrackingPassed;
+    if (!duplicateTrackingPassed)
+    {
+        std::cerr
+            << "Duplicate tracking-wait merge/rollback/retry test failed\n";
+    }
+    messageCallback.errors = errorsBeforeDuplicateTracking;
 
     VkSemaphore aliasCompletion = timeline();
     auto signalOnQueue = [&](nvrhi::CommandQueue queueType, uint64_t value) {

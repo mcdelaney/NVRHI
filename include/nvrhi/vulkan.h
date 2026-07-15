@@ -60,6 +60,13 @@ namespace nvrhi::vulkan
         // The caller is also responsible for enabling any Vulkan feature or
         // extension required by feature-gated stage bits.
         const VkPipelineStageFlags2* waitStageMasks = nullptr;
+        // Makes the exact successfully-submitted queue frontier explicit in
+        // this submit by waiting on NVRHI's tracking timeline semaphore while
+        // the queue submission mutex is held. The wait is inserted after
+        // accumulator waits and before the caller's waits. Vulkan queue order
+        // already guarantees this dependency; this option exists for tooling
+        // that reconstructs queue history only from explicit semaphore waits.
+        bool waitForCurrentQueueFrontier = false;
     };
 
     // Describes one explicit queue-family ownership handoff for an exclusive
