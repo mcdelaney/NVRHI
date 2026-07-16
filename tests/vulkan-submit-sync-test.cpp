@@ -229,6 +229,53 @@ namespace
 
     PFN_vkCreateDescriptorSetLayout realCreateDescriptorSetLayout = nullptr;
     PFN_vkCreateDescriptorPool realCreateDescriptorPool = nullptr;
+    PFN_vkCreateImageView realCreateImageView = nullptr;
+    PFN_vkUpdateDescriptorSets realUpdateDescriptorSets = nullptr;
+
+    struct TextureSrvViewPrecreateProbe
+    {
+        bool active = false;
+        bool failNextCreate = false;
+        uint32_t createCalls = 0;
+        uint32_t descriptorUpdateCalls = 0;
+    } textureSrvViewPrecreateProbe;
+
+    VKAPI_ATTR VkResult VKAPI_CALL probeCreateImageView(
+        VkDevice device,
+        const VkImageViewCreateInfo* createInfo,
+        const VkAllocationCallbacks* allocationCallbacks,
+        VkImageView* imageView)
+    {
+        if (textureSrvViewPrecreateProbe.active)
+        {
+            ++textureSrvViewPrecreateProbe.createCalls;
+            if (textureSrvViewPrecreateProbe.failNextCreate)
+            {
+                textureSrvViewPrecreateProbe.failNextCreate = false;
+                if (imageView)
+                    *imageView = VK_NULL_HANDLE;
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+        }
+
+        return realCreateImageView(
+            device, createInfo, allocationCallbacks, imageView);
+    }
+
+    VKAPI_ATTR void VKAPI_CALL probeUpdateDescriptorSets(
+        VkDevice device,
+        uint32_t descriptorWriteCount,
+        const VkWriteDescriptorSet* descriptorWrites,
+        uint32_t descriptorCopyCount,
+        const VkCopyDescriptorSet* descriptorCopies)
+    {
+        if (textureSrvViewPrecreateProbe.active)
+            ++textureSrvViewPrecreateProbe.descriptorUpdateCalls;
+
+        realUpdateDescriptorSets(
+            device, descriptorWriteCount, descriptorWrites,
+            descriptorCopyCount, descriptorCopies);
+    }
 
     struct DescriptorUpdateAfterBindProbe
     {
@@ -720,6 +767,98 @@ int main()
         return 1;
 
     bool passed = true;
+
+    // A Texture_SRV view can be created before descriptor publication. The
+    // precreate call must cache the same view used by writeDescriptorTable,
+    // perform no descriptor update itself, report allocation failure without
+    // asserting, and leave a failed key retryable.
+    {
+        nvrhi::TextureDesc textureDesc {};
+        textureDesc.width = 4;
+        textureDesc.height = 4;
+        textureDesc.mipLevels = 2;
+        textureDesc.format = nvrhi::Format::RGBA8_UNORM;
+        textureDesc.debugName = "TextureSrvViewPrecreate";
+        nvrhi::TextureHandle cachedTexture = device->createTexture(textureDesc);
+
+        textureDesc.debugName = "TextureSrvViewPrecreateRetry";
+        nvrhi::TextureHandle retryTexture = device->createTexture(textureDesc);
+
+        bool precreatePassed = cachedTexture && retryTexture;
+        const uint32_t errorsBeforePrecreate = messageCallback.errors;
+        if (precreatePassed)
+        {
+            realCreateImageView =
+                VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView;
+            realUpdateDescriptorSets =
+                VULKAN_HPP_DEFAULT_DISPATCHER.vkUpdateDescriptorSets;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView =
+                probeCreateImageView;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkUpdateDescriptorSets =
+                probeUpdateDescriptorSets;
+            textureSrvViewPrecreateProbe = {};
+            textureSrvViewPrecreateProbe.active = true;
+
+            nvrhi::BindingSetItem cachedItem =
+                nvrhi::BindingSetItem::Texture_SRV(0, cachedTexture);
+            const bool firstCreate =
+                device->precreateTextureSrvView(cachedItem);
+            cachedItem.slot = 7;
+            const bool cachedCreate =
+                device->precreateTextureSrvView(cachedItem);
+            precreatePassed &= firstCreate
+                && cachedCreate
+                && textureSrvViewPrecreateProbe.createCalls == 1
+                && textureSrvViewPrecreateProbe.descriptorUpdateCalls == 0;
+
+            const nvrhi::BindingSetItem retryItem =
+                nvrhi::BindingSetItem::Texture_SRV(0, retryTexture);
+            textureSrvViewPrecreateProbe.failNextCreate = true;
+            const bool failureReported =
+                !device->precreateTextureSrvView(retryItem);
+            const bool retrySucceeded =
+                device->precreateTextureSrvView(retryItem);
+            precreatePassed &= failureReported
+                && retrySucceeded
+                && textureSrvViewPrecreateProbe.createCalls == 3
+                && textureSrvViewPrecreateProbe.descriptorUpdateCalls == 0
+                && messageCallback.errors == errorsBeforePrecreate + 1;
+
+            if (supportsDescriptorUpdateAfterBindProbe)
+            {
+                nvrhi::BindlessLayoutDesc layoutDesc {};
+                layoutDesc.visibility = nvrhi::ShaderType::All;
+                layoutDesc.maxCapacity = 8;
+                layoutDesc.registerSpaces.push_back(
+                    nvrhi::BindingLayoutItem::Texture_SRV(0));
+                nvrhi::BindingLayoutHandle layout =
+                    device->createBindlessLayout(layoutDesc);
+                nvrhi::DescriptorTableHandle table = layout
+                    ? device->createDescriptorTable(layout) : nullptr;
+
+                const uint32_t createCallsBeforeWrite =
+                    textureSrvViewPrecreateProbe.createCalls;
+                cachedItem.slot = 0;
+                const bool writeSucceeded = table
+                    && device->writeDescriptorTable(table, cachedItem);
+                precreatePassed &= writeSucceeded
+                    && textureSrvViewPrecreateProbe.createCalls
+                        == createCallsBeforeWrite
+                    && textureSrvViewPrecreateProbe.descriptorUpdateCalls == 1;
+            }
+
+            textureSrvViewPrecreateProbe.active = false;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView =
+                realCreateImageView;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkUpdateDescriptorSets =
+                realUpdateDescriptorSets;
+            messageCallback.errors = errorsBeforePrecreate;
+        }
+
+        passed &= precreatePassed;
+        if (!precreatePassed)
+            std::cerr << "Texture SRV view precreate test failed\n";
+    }
 
     // Stage-qualified resource-state tracking must narrow only shader-visible
     // portions of a dependency. Fixed-function stages remain state-derived,

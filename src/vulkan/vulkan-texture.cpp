@@ -256,7 +256,7 @@ namespace nvrhi::vulkan
             texture->imageInfo.setPNext(&texture->externalMemoryImageInfo);
     }
 
-    TextureSubresourceView& Texture::getSubresourceView(const TextureSubresourceSet& subresource, TextureDimension dimension,
+    TextureSubresourceView* Texture::getSubresourceView(const TextureSubresourceSet& subresource, TextureDimension dimension,
         Format format, vk::ImageUsageFlags usage, TextureSubresourceViewType viewtype)
     {
         // This function is called from createBindingSet etc. and therefore free-threaded.
@@ -278,7 +278,7 @@ namespace nvrhi::vulkan
         auto iter = subresourceViews.find(cachekey);
         if (iter != subresourceViews.end())
         {
-            return iter->second;
+            return &iter->second;
         }
 
         auto iter_pair = subresourceViews.emplace(cachekey, *this);
@@ -318,12 +318,20 @@ namespace nvrhi::vulkan
         }
 
         const vk::Result res = m_Context.device.createImageView(&viewInfo, m_Context.allocationCallbacks, &view.view);
-        ASSERT_VK_OK(res);
+        if (res != vk::Result::eSuccess)
+        {
+            m_Context.error(
+                std::string("Failed to create an image view for texture '")
+                + utils::DebugNameToString(desc.debugName)
+                + "': " + resultToString(VkResult(res)));
+            subresourceViews.erase(iter_pair.first);
+            return nullptr;
+        }
 
         const std::string debugName = std::string("ImageView for: ") + utils::DebugNameToString(desc.debugName);
         m_Context.nameVKObject(VkImageView(view.view), vk::ObjectType::eImageView, vk::DebugReportObjectTypeEXT::eImageView, debugName.c_str());
 
-        return view;
+        return &view;
     }
 
     TextureHandle Device::createTexture(const TextureDesc& desc)
@@ -774,7 +782,11 @@ namespace nvrhi::vulkan
                 viewType = TextureSubresourceViewType::StencilOnly;
 
             // Note: we don't have the intended usage information here, so VkImageViewUsageCreateInfo won't be added to the view.
-            return Object(getSubresourceView(subresources, dimension, format, vk::ImageUsageFlags(0), viewType).view);
+            const auto* view = getSubresourceView(
+                subresources, dimension, format, vk::ImageUsageFlags(0), viewType);
+            if (!view)
+                return nullptr;
+            return Object(view->view);
         }
         default:
             return nullptr;

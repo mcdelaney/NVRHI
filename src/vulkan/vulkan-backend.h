@@ -560,7 +560,7 @@ namespace nvrhi::vulkan
         // returns a subresource view for an arbitrary range of mip levels and array layers.
         // 'viewtype' only matters when asking for a depth-stencil view; in situations where only depth or stencil can be bound
         // (such as an SRV with ImageLayout::eShaderReadOnlyOptimal), but not both, then this specifies which of the two aspect bits is to be set.
-        TextureSubresourceView& getSubresourceView(const TextureSubresourceSet& subresources, TextureDimension dimension,
+        TextureSubresourceView* getSubresourceView(const TextureSubresourceSet& subresources, TextureDimension dimension,
             Format format, vk::ImageUsageFlags usage, TextureSubresourceViewType viewtype = TextureSubresourceViewType::AllAspects);
         
         uint32_t getNumSubresources() const;
@@ -1336,6 +1336,7 @@ namespace nvrhi::vulkan
         bool supportsEfficientQueueOwnershipTransfer(
             CommandQueue sourceQueue, CommandQueue destinationQueue) const override;
         std::mutex& getQueueMutex(CommandQueue queue) override;
+        bool precreateTextureSrvView(const BindingSetItem& binding) override;
         uint64_t executeCommandListsWithSyncIsolated(
             ICommandList* const* pCommandLists, size_t numCommandLists,
             CommandQueue executionQueue,

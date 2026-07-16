@@ -180,6 +180,14 @@ namespace nvrhi::vulkan
         // including vk::Queue::*: ErrorDeviceLost.
         virtual std::mutex& getQueueMutex(CommandQueue queue) = 0;
 
+        // Creates and caches the exact VkImageView that a later
+        // IDevice::writeDescriptorTable call would use for this Texture_SRV
+        // item. Slot and array placement are ignored. This method never
+        // creates or updates a descriptor set/table and is safe to call
+        // before a descriptor-publication commit point. Returns false for an
+        // invalid/non-Vulkan texture or when vkCreateImageView fails.
+        virtual bool precreateTextureSrvView(const BindingSetItem& binding) = 0;
+
         // Sparse-residency variant that signals signalSemaphore at signalValue
         // from vkQueueBindSparse, so the caller can wait on the bind from a
         // subsequent submit without a host stall. Pass VK_NULL_HANDLE for

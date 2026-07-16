@@ -312,6 +312,40 @@ namespace nvrhi::vulkan
             return Texture::TextureSubresourceViewType::AllAspects;
     }
 
+    bool Device::precreateTextureSrvView(const BindingSetItem& binding)
+    {
+        if (binding.type != ResourceType::Texture_SRV)
+        {
+            m_Context.error(
+                "precreateTextureSrvView requires a Texture_SRV binding");
+            return false;
+        }
+
+        Texture* texture = dynamic_cast<Texture*>(binding.resourceHandle);
+        if (!texture || !texture->belongsTo(m_Context) || !texture->image)
+        {
+            m_Context.error(
+                "precreateTextureSrvView requires a texture from this Vulkan device");
+            return false;
+        }
+
+        const TextureSubresourceSet subresource =
+            binding.subresources.resolve(texture->desc, false);
+        if (subresource.numMipLevels == 0 || subresource.numArraySlices == 0)
+        {
+            m_Context.error(
+                "precreateTextureSrvView subresources do not intersect the texture");
+            return false;
+        }
+
+        const auto textureViewType =
+            getTextureViewType(binding.format, texture->desc.format);
+        const auto* view = texture->getSubresourceView(
+            subresource, binding.dimension, binding.format,
+            vk::ImageUsageFlagBits::eSampled, textureViewType);
+        return view && view->view;
+    }
+
     BindingSetHandle Device::createBindingSet(const BindingSetDesc& desc, IBindingLayout* _layout)
     {
         BindingLayout* layout = checked_cast<BindingLayout*>(_layout);
@@ -407,11 +441,18 @@ namespace nvrhi::vulkan
 
                 const auto subresource = binding.subresources.resolve(texture->desc, false);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
-                auto& view = texture->getSubresourceView(subresource, binding.dimension, binding.format, vk::ImageUsageFlagBits::eSampled, textureViewType);
+                const auto* view = texture->getSubresourceView(
+                    subresource, binding.dimension, binding.format,
+                    vk::ImageUsageFlagBits::eSampled, textureViewType);
+                if (!view)
+                {
+                    delete ret;
+                    return nullptr;
+                }
 
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
-                    .setImageView(view.view)
+                    .setImageView(view->view)
                     .setImageLayout(convertTextureLayout(requiredState, texture->desc));
 
                 generateWriteDescriptorData(
@@ -436,11 +477,18 @@ namespace nvrhi::vulkan
 
                 const auto subresource = binding.subresources.resolve(texture->desc, true);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
-                auto& view = texture->getSubresourceView(subresource, binding.dimension, binding.format, vk::ImageUsageFlagBits::eStorage, textureViewType);
+                const auto* view = texture->getSubresourceView(
+                    subresource, binding.dimension, binding.format,
+                    vk::ImageUsageFlagBits::eStorage, textureViewType);
+                if (!view)
+                {
+                    delete ret;
+                    return nullptr;
+                }
 
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
-                    .setImageView(view.view)
+                    .setImageView(view->view)
                     .setImageLayout(convertTextureLayout(ResourceStates::UnorderedAccess, texture->desc));
 
                 generateWriteDescriptorData(
@@ -779,8 +827,12 @@ namespace nvrhi::vulkan
             );
         };
 
+        bool imageViewCreationFailed = false;
         auto writeDescriptorForBinding = [&](const vk::DescriptorSetLayoutBinding& layoutBinding) -> void
         {
+            if (imageViewCreationFailed)
+                return;
+
             switch (binding.type)
             {
             case ResourceType::Texture_SRV:
@@ -796,11 +848,18 @@ namespace nvrhi::vulkan
 
                 const auto subresource = binding.subresources.resolve(texture->desc, false);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
-                auto& view = texture->getSubresourceView(subresource, binding.dimension, binding.format, vk::ImageUsageFlagBits::eSampled, textureViewType);
+                const auto* view = texture->getSubresourceView(
+                    subresource, binding.dimension, binding.format,
+                    vk::ImageUsageFlagBits::eSampled, textureViewType);
+                if (!view)
+                {
+                    imageViewCreationFailed = true;
+                    return;
+                }
 
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
-                    .setImageView(view.view)
+                    .setImageView(view->view)
                     .setImageLayout(convertTextureLayout(requiredState, texture->desc));
 
                 generateWriteDescriptorData(layoutBinding.binding,
@@ -815,11 +874,18 @@ namespace nvrhi::vulkan
 
                 const auto subresource = binding.subresources.resolve(texture->desc, true);
                 const auto textureViewType = getTextureViewType(binding.format, texture->desc.format);
-                auto& view = texture->getSubresourceView(subresource, binding.dimension, binding.format, vk::ImageUsageFlagBits::eStorage, textureViewType);
+                const auto* view = texture->getSubresourceView(
+                    subresource, binding.dimension, binding.format,
+                    vk::ImageUsageFlagBits::eStorage, textureViewType);
+                if (!view)
+                {
+                    imageViewCreationFailed = true;
+                    return;
+                }
 
                 auto& imageInfo = descriptorImageInfo.emplace_back();
                 imageInfo = vk::DescriptorImageInfo()
-                    .setImageView(view.view)
+                    .setImageView(view->view)
                     .setImageLayout(convertTextureLayout(ResourceStates::UnorderedAccess, texture->desc));
 
                 generateWriteDescriptorData(layoutBinding.binding,
@@ -934,6 +1000,9 @@ namespace nvrhi::vulkan
                 }
             }
         }
+
+        if (imageViewCreationFailed)
+            return false;
 
         m_Context.device.updateDescriptorSets(uint32_t(descriptorWriteInfo.size()), descriptorWriteInfo.data(), 0, nullptr);
 

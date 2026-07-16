@@ -71,11 +71,18 @@ namespace nvrhi::vulkan
 
             TextureDimension dimension = getDimensionForFramebuffer(t->desc.dimension, subresources.numArraySlices > 1);
 
-            const auto& view = t->getSubresourceView(subresources, dimension, rt.format, vk::ImageUsageFlagBits::eColorAttachment);
+            const auto* view = t->getSubresourceView(
+                subresources, dimension, rt.format,
+                vk::ImageUsageFlagBits::eColorAttachment);
+            if (!view)
+            {
+                delete fb;
+                return nullptr;
+            }
             
             vk::RenderingAttachmentInfo& attachmentInfo = fb->colorAttachments.emplace_back();
             attachmentInfo = vk::RenderingAttachmentInfo()
-                .setImageView(view.view)
+                .setImageView(view->view)
                 .setImageLayout(convertTextureLayout(ResourceStates::RenderTarget, t->desc))
                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
                 .setStoreOp(vk::AttachmentStoreOp::eStore);
@@ -102,10 +109,17 @@ namespace nvrhi::vulkan
 
             TextureDimension dimension = getDimensionForFramebuffer(texture->desc.dimension, subresources.numArraySlices > 1);
 
-            const auto& view = texture->getSubresourceView(subresources, dimension, att.format, vk::ImageUsageFlagBits::eDepthStencilAttachment);
+            const auto* view = texture->getSubresourceView(
+                subresources, dimension, att.format,
+                vk::ImageUsageFlagBits::eDepthStencilAttachment);
+            if (!view)
+            {
+                delete fb;
+                return nullptr;
+            }
 
             fb->depthAttachment = vk::RenderingAttachmentInfo()
-                .setImageView(view.view)
+                .setImageView(view->view)
                 .setImageLayout(depthLayout)
                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
                 // STORE is a depth/stencil write for synchronization purposes,
@@ -133,7 +147,14 @@ namespace nvrhi::vulkan
             TextureSubresourceSet subresources = vrsAttachment.subresources.resolve(vrsTexture->desc, true);
             TextureDimension dimension = getDimensionForFramebuffer(vrsTexture->desc.dimension, subresources.numArraySlices > 1);
 
-            const auto& view = vrsTexture->getSubresourceView(subresources, dimension, vrsAttachment.format, vk::ImageUsageFlagBits::eFragmentShadingRateAttachmentKHR);
+            const auto* view = vrsTexture->getSubresourceView(
+                subresources, dimension, vrsAttachment.format,
+                vk::ImageUsageFlagBits::eFragmentShadingRateAttachmentKHR);
+            if (!view)
+            {
+                delete fb;
+                return nullptr;
+            }
 
             auto rateProps = vk::PhysicalDeviceFragmentShadingRatePropertiesKHR();
             auto props = vk::PhysicalDeviceProperties2();
@@ -142,7 +163,7 @@ namespace nvrhi::vulkan
 
             fb->shadingRateAttachment = vk::RenderingFragmentShadingRateAttachmentInfoKHR()
                 .setImageLayout(convertTextureLayout(ResourceStates::ShadingRateSurface, vrsTexture->desc))
-                .setImageView(view.view)
+                .setImageView(view->view)
                 .setShadingRateAttachmentTexelSize(rateProps.minFragmentShadingRateAttachmentTexelSize);
 
             fb->resources.push_back(vrsAttachment.texture);
