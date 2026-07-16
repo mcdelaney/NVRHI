@@ -301,7 +301,7 @@ namespace nvrhi::vulkan
                 {
                     PendingSemaphoreWait& frontierWait =
                         (*waitSemaphores)[frontierWaitIndex];
-                    frontierWait.value = std::max(
+                    frontierWait.value = std::max<uint64_t>(
                         frontierWait.value,
                         extras->waitValues ? extras->waitValues[i] : 0ull);
                     frontierWait.stageMask |= stageMask;
