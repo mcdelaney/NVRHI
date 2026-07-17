@@ -240,12 +240,28 @@ namespace
         uint32_t descriptorUpdateCalls = 0;
     } textureSrvViewPrecreateProbe;
 
+    struct NativeDepthViewProbe
+    {
+        bool active = false;
+        uint32_t createCalls = 0;
+        VkFormat lastFormat = VK_FORMAT_UNDEFINED;
+        VkImageAspectFlags lastAspectMask = 0;
+    } nativeDepthViewProbe;
+
     VKAPI_ATTR VkResult VKAPI_CALL probeCreateImageView(
         VkDevice device,
         const VkImageViewCreateInfo* createInfo,
         const VkAllocationCallbacks* allocationCallbacks,
         VkImageView* imageView)
     {
+        if (nativeDepthViewProbe.active && createInfo)
+        {
+            ++nativeDepthViewProbe.createCalls;
+            nativeDepthViewProbe.lastFormat = createInfo->format;
+            nativeDepthViewProbe.lastAspectMask =
+                createInfo->subresourceRange.aspectMask;
+        }
+
         if (textureSrvViewPrecreateProbe.active)
         {
             ++textureSrvViewPrecreateProbe.createCalls;
@@ -858,6 +874,104 @@ int main()
         passed &= precreatePassed;
         if (!precreatePassed)
             std::cerr << "Texture SRV view precreate test failed\n";
+    }
+
+    // Native interop sometimes needs the depth aspect of a combined
+    // depth/stencil image (for example, NGX depth input). The explicit native
+    // view must preserve the combined VkFormat while excluding stencil, and it
+    // must be cached independently from the legacy all-aspects native view.
+    {
+        struct CombinedDepthFormatCandidate
+        {
+            VkFormat vkFormat;
+            nvrhi::Format nvrhiFormat;
+        };
+        constexpr std::array<CombinedDepthFormatCandidate, 2> candidates {{
+            { VK_FORMAT_D32_SFLOAT_S8_UINT, nvrhi::Format::D32S8 },
+            { VK_FORMAT_D24_UNORM_S8_UINT, nvrhi::Format::D24S8 },
+        }};
+
+        VkFormat nativeFormat = VK_FORMAT_UNDEFINED;
+        nvrhi::Format nvrhiFormat = nvrhi::Format::UNKNOWN;
+        for (const CombinedDepthFormatCandidate& candidate : candidates)
+        {
+            VkFormatProperties properties {};
+            vkGetPhysicalDeviceFormatProperties(
+                physicalDevice, candidate.vkFormat, &properties);
+            constexpr VkFormatFeatureFlags requiredFeatures =
+                VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            if ((properties.optimalTilingFeatures & requiredFeatures)
+                == requiredFeatures)
+            {
+                nativeFormat = candidate.vkFormat;
+                nvrhiFormat = candidate.nvrhiFormat;
+                break;
+            }
+        }
+
+        bool nativeDepthViewPassed = nvrhiFormat != nvrhi::Format::UNKNOWN;
+        nvrhi::TextureHandle texture;
+        if (nativeDepthViewPassed)
+        {
+            nvrhi::TextureDesc desc {};
+            desc.width = 4;
+            desc.height = 4;
+            desc.format = nvrhiFormat;
+            desc.isRenderTarget = true;
+            desc.debugName = "NativeDepthOnlyCombinedView";
+            texture = device->createTexture(desc);
+            nativeDepthViewPassed = static_cast<bool>(texture);
+        }
+
+        if (nativeDepthViewPassed)
+        {
+            realCreateImageView =
+                VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView =
+                probeCreateImageView;
+            nativeDepthViewProbe = {};
+            nativeDepthViewProbe.active = true;
+
+            const nvrhi::Object depthView = texture->getNativeView(
+                nvrhi::ObjectTypes::VK_ImageView_DepthOnly);
+            const VkFormat depthViewFormat = nativeDepthViewProbe.lastFormat;
+            const VkImageAspectFlags depthViewAspects =
+                nativeDepthViewProbe.lastAspectMask;
+            const uint32_t callsAfterFirstDepthView =
+                nativeDepthViewProbe.createCalls;
+            const nvrhi::Object cachedDepthView = texture->getNativeView(
+                nvrhi::ObjectTypes::VK_ImageView_DepthOnly);
+            const uint32_t callsAfterCachedDepthView =
+                nativeDepthViewProbe.createCalls;
+            const nvrhi::Object allAspectsView = texture->getNativeView(
+                nvrhi::ObjectTypes::VK_ImageView);
+            const VkFormat allAspectsFormat = nativeDepthViewProbe.lastFormat;
+            const VkImageAspectFlags allAspects =
+                nativeDepthViewProbe.lastAspectMask;
+
+            nativeDepthViewProbe.active = false;
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView =
+                realCreateImageView;
+
+            nativeDepthViewPassed = depthView.integer != 0
+                && cachedDepthView.integer == depthView.integer
+                && allAspectsView.integer != 0
+                && allAspectsView.integer != depthView.integer
+                && callsAfterFirstDepthView == 1
+                && callsAfterCachedDepthView == 1
+                && nativeDepthViewProbe.createCalls == 2
+                && depthViewFormat == nativeFormat
+                && depthViewAspects == VK_IMAGE_ASPECT_DEPTH_BIT
+                && allAspectsFormat == nativeFormat
+                && allAspects
+                    == (VK_IMAGE_ASPECT_DEPTH_BIT
+                        | VK_IMAGE_ASPECT_STENCIL_BIT);
+        }
+
+        passed &= nativeDepthViewPassed;
+        if (!nativeDepthViewPassed)
+            std::cerr << "Native combined depth-only view test failed\n";
     }
 
     // Stage-qualified resource-state tracking must narrow only shader-visible

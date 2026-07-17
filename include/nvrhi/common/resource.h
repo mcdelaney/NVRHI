@@ -73,6 +73,10 @@ namespace nvrhi
         constexpr ObjectType VK_Buffer                              = 0x00030007;
         constexpr ObjectType VK_Image                               = 0x00030008;
         constexpr ObjectType VK_ImageView                           = 0x00030009;
+        // Requests a VkImageView restricted to the depth aspect without
+        // changing the requested/default view format (for example, the default
+        // view of a D32S8 image remains D32S8).
+        constexpr ObjectType VK_ImageView_DepthOnly                 = 0x00030016;
         constexpr ObjectType VK_AccelerationStructureKHR            = 0x0003000a;
         constexpr ObjectType VK_Sampler                             = 0x0003000b;
         constexpr ObjectType VK_ShaderModule                        = 0x0003000c;

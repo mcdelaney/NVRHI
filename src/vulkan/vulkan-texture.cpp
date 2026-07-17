@@ -768,7 +768,8 @@ namespace nvrhi::vulkan
     {
         switch (objectType)
         {
-        case ObjectTypes::VK_ImageView: 
+        case ObjectTypes::VK_ImageView:
+        case ObjectTypes::VK_ImageView_DepthOnly:
         {
             if (format == Format::UNKNOWN)
                 format = desc.format;
@@ -776,7 +777,13 @@ namespace nvrhi::vulkan
             const FormatInfo& formatInfo = getFormatInfo(format);
 
             TextureSubresourceViewType viewType = TextureSubresourceViewType::AllAspects;
-            if (formatInfo.hasDepth && !formatInfo.hasStencil)
+            if (objectType == ObjectTypes::VK_ImageView_DepthOnly)
+            {
+                if (!formatInfo.hasDepth)
+                    return nullptr;
+                viewType = TextureSubresourceViewType::DepthOnly;
+            }
+            else if (formatInfo.hasDepth && !formatInfo.hasStencil)
                 viewType = TextureSubresourceViewType::DepthOnly;
             else if(!formatInfo.hasDepth && formatInfo.hasStencil)
                 viewType = TextureSubresourceViewType::StencilOnly;
