@@ -51,7 +51,8 @@ namespace nvrhi::vulkan
     }
         
     Device::Device(const DeviceDesc& desc)
-        : m_Context(desc.instance, desc.physicalDevice, desc.device, reinterpret_cast<vk::AllocationCallbacks*>(desc.allocationCallbacks))
+        : m_AccelStructStorageSharedAcrossQueues(desc.accelStructStorageSharedAcrossQueues)
+        , m_Context(desc.instance, desc.physicalDevice, desc.device, reinterpret_cast<vk::AllocationCallbacks*>(desc.allocationCallbacks))
         , m_Allocator(m_Context)
         , m_TimerQueryAllocator(desc.maxTimerQueries, true)
     {
@@ -279,7 +280,18 @@ namespace nvrhi::vulkan
 #ifdef NVRHI_WITH_RTXMU
         if (m_Context.extensions.KHR_acceleration_structure)
         {
-            m_Context.rtxMemUtil = std::make_unique<rtxmu::VkAccelStructManager>(desc.instance, desc.device, desc.physicalDevice);
+            if (m_AccelStructStorageSharedAcrossQueues
+                && m_ConcurrentQueueFamilyIndices.size() > 1)
+            {
+                m_Context.rtxMemUtil = std::make_unique<rtxmu::VkAccelStructManager>(
+                    desc.instance, desc.device, desc.physicalDevice,
+                    m_ConcurrentQueueFamilyIndices);
+            }
+            else
+            {
+                m_Context.rtxMemUtil = std::make_unique<rtxmu::VkAccelStructManager>(
+                    desc.instance, desc.device, desc.physicalDevice);
+            }
 
             // Initialize suballocator blocks to 8 MB
             m_Context.rtxMemUtil->Initialize(8388608);

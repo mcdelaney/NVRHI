@@ -1132,7 +1132,7 @@ int main()
             const vk::DependencyFlags maintenance8OwnershipFlag =
                 vk::DependencyFlagBits::eQueueFamilyOwnershipTransferUseAllStagesKHR;
 
-            mappingPassed &= nvrhi::c_HeaderVersion == 32
+            mappingPassed &= nvrhi::c_HeaderVersion == 33
                 && defaultTransfer.sourceQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.destinationQueue == nvrhi::CommandQueue::Count
                 && defaultTransfer.stateBefore == nvrhi::ResourceStates::Unknown

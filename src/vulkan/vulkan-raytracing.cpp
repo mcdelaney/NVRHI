@@ -305,6 +305,7 @@ namespace nvrhi::vulkan
         bufferDesc.initialState = ResourceStates::AccelStructBuildBlas;
         bufferDesc.keepInitialState = true;
         bufferDesc.isAccelStructStorage = true;
+        bufferDesc.sharedAcrossQueues = m_AccelStructStorageSharedAcrossQueues;
         bufferDesc.debugName = desc.debugName;
         bufferDesc.isVirtual = false;
         om->dataBuffer = createBuffer(bufferDesc);
@@ -382,6 +383,7 @@ namespace nvrhi::vulkan
             bufferDesc.initialState = desc.isTopLevel ? ResourceStates::AccelStructRead : ResourceStates::AccelStructBuildBlas;
             bufferDesc.keepInitialState = true;
             bufferDesc.isAccelStructStorage = true;
+            bufferDesc.sharedAcrossQueues = m_AccelStructStorageSharedAcrossQueues;
             bufferDesc.isVirtual = desc.isVirtual;
             as->dataBuffer = createBuffer(bufferDesc);
 
@@ -435,6 +437,21 @@ namespace nvrhi::vulkan
 
         if (as->dataBuffer)
             return getBufferMemoryRequirements(as->dataBuffer);
+
+#ifdef NVRHI_WITH_RTXMU
+        // RTXMU owns BLAS backing allocations, so dataBuffer is intentionally
+        // null. Report the live result allocation instead of making callers
+        // (including VRAM telemetry) treat every RTXMU BLAS as zero bytes.
+        if (as->rtxmuId != ~0ull
+            && m_Context.rtxMemUtil->IsValid(as->rtxmuId))
+        {
+            MemoryRequirements memReq;
+            memReq.size = m_Context.rtxMemUtil->GetCompactionComplete(as->rtxmuId)
+                ? m_Context.rtxMemUtil->GetCompactedAccelStructSize(as->rtxmuId)
+                : m_Context.rtxMemUtil->GetInitialAccelStructSize(as->rtxmuId);
+            return memReq;
+        }
+#endif
 
         return MemoryRequirements();
     }
@@ -1021,6 +1038,16 @@ namespace nvrhi::vulkan
         Buffer* instanceBuffer = checked_cast<Buffer*>(_instanceBuffer);
 
         as->instances.clear();
+
+#ifdef NVRHI_WITH_RTXMU
+        // Match buildTopLevelAccelStruct's CPU-instance path: RTXMU owns the
+        // backing buffers for its BLASes, so NVRHI's ordinary resource-state
+        // tracker cannot express the BLAS-build -> TLAS-build dependency.
+        // The instance-buffer path is used by GPU-packed TLAS descriptors and
+        // may consume BLASes built earlier in this same command buffer.
+        m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(
+            m_CurrentCmdBuf->cmdBuf, m_CurrentCmdBuf->rtxmuBuildIds);
+#endif
 
         if (m_EnableAutomaticBarriers)
         {

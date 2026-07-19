@@ -393,6 +393,12 @@ namespace nvrhi::vulkan
         // when the externally-owned VkDevice was created. The extension name
         // must also be present in deviceExtensions.
         bool maintenance8Supported = false;
+        // Creates acceleration-structure storage buffers with
+        // VK_SHARING_MODE_CONCURRENT across every distinct queue family supplied
+        // above. This is an immutable device-creation policy: it covers native
+        // TLAS/non-RTXMU BLAS backing and RTXMU result/compaction pools, while
+        // transient scratch/update/query resources remain queue-exclusive.
+        bool accelStructStorageSharedAcrossQueues = false;
         bool aftermathEnabled = false;
         bool logBufferLifetime = false;
 

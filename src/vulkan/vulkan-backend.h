@@ -1409,6 +1409,10 @@ namespace nvrhi::vulkan
         bool m_AftermathEnabled = false;
         AftermathCrashDumpHelper m_AftermathCrashDumpHelper;
 
+        // Immutable allocation policy copied from DeviceDesc. Effective
+        // Concurrent sharing still requires at least two distinct queue
+        // families in m_ConcurrentQueueFamilyIndices.
+        const bool m_AccelStructStorageSharedAcrossQueues;
         VulkanContext m_Context;
         VulkanAllocator m_Allocator;
         
