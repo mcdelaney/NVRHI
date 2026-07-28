@@ -99,6 +99,15 @@ namespace nvrhi::vulkan
         commitBarriers();
 
 #ifdef NVRHI_WITH_RTXMU
+        // Any RTXMU BLAS writes not already consumed by a TLAS still need to
+        // become visible before the optional compaction-size AS reads below.
+        if (!m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.empty())
+        {
+            m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(
+                m_CurrentCmdBuf->cmdBuf,
+                m_CurrentCmdBuf->rtxmuPendingUavBarrierIds);
+            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.clear();
+        }
         if (!m_CurrentCmdBuf->rtxmuBuildIds.empty())
         {
             m_Context.rtxMemUtil->PopulateCompactionSizeCopiesCommandList(m_CurrentCmdBuf->cmdBuf, m_CurrentCmdBuf->rtxmuBuildIds);

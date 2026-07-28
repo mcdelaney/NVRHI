@@ -242,6 +242,7 @@ namespace nvrhi::vulkan
 
 #ifdef NVRHI_WITH_RTXMU
         std::vector<uint64_t> rtxmuBuildIds;
+        std::vector<uint64_t> rtxmuPendingUavBarrierIds;
         std::vector<uint64_t> rtxmuCompactionIds;
 #endif
 
@@ -1170,7 +1171,9 @@ namespace nvrhi::vulkan
         vk::AccelerationStructureKHR accelStruct;
         vk::DeviceAddress accelStructDeviceAddress = 0;
         rt::AccelStructDesc desc;
+        size_t lastTlasBuildInstanceCount = 0;
         bool allowUpdate = false;
+        bool tlasBuilt = false;
         bool compacted = false;
         size_t rtxmuId = ~0ull;
         vk::Buffer rtxmuBuffer;

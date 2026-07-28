@@ -795,6 +795,7 @@ namespace nvrhi::vulkan
             as->accelStructDeviceAddress = m_Context.rtxMemUtil->GetDeviceAddress(as->rtxmuId);
 
             m_CurrentCmdBuf->rtxmuBuildIds.push_back(as->rtxmuId);
+            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
         }
         else
         {
@@ -806,12 +807,25 @@ namespace nvrhi::vulkan
                                                             maxPrimArrays.data(),
                                                             (uint32_t)buildInfos.size(),
                                                             buildsToUpdate);
+
+            // Keep refits in the same dependency set as initial RTXMU builds.
+            // A GPU-buffer TLAS build cannot enumerate its child BLASes, so it
+            // consumes this list to emit AS_WRITE -> AS_READ barriers before
+            // reading the updated child bounds.
+            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
         }
 #else
 
         if (m_EnableAutomaticBarriers)
         {
-            requireBufferState(as->dataBuffer, nvrhi::ResourceStates::AccelStructWrite);
+            // An update reads the prior AS through srcAccelerationStructure and
+            // writes the replacement hierarchy through dstAccelerationStructure.
+            // Model both accesses on the in-place backing buffer.
+            const auto targetState = performUpdate
+                ? (nvrhi::ResourceStates::AccelStructBuildBlas
+                    | nvrhi::ResourceStates::AccelStructWrite)
+                : nvrhi::ResourceStates::AccelStructWrite;
+            requireBufferState(as->dataBuffer, targetState);
         }
         commitBarriers();
 
@@ -889,8 +903,34 @@ namespace nvrhi::vulkan
         const bool performUpdate = (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != 0;
         if (performUpdate)
         {
+            if (!as->allowUpdate)
+            {
+                std::stringstream ss;
+                ss << "Cannot update TLAS " << utils::DebugNameToString(as->desc.debugName)
+                    << " because it was not created with AllowUpdate";
+                m_Context.error(ss.str());
+                return;
+            }
+            if (!as->tlasBuilt)
+            {
+                std::stringstream ss;
+                ss << "Cannot update TLAS " << utils::DebugNameToString(as->desc.debugName)
+                    << " before an initial build";
+                m_Context.error(ss.str());
+                return;
+            }
+            if (as->lastTlasBuildInstanceCount != numInstances)
+            {
+                std::stringstream ss;
+                ss << "Cannot update TLAS " << utils::DebugNameToString(as->desc.debugName)
+                    << " with " << numInstances << " instances after a build with "
+                    << as->lastTlasBuildInstanceCount;
+                m_Context.error(ss.str());
+                return;
+            }
             assert(as->allowUpdate);
-            assert(as->instances.size() == numInstances);
+            assert(as->tlasBuilt);
+            assert(as->lastTlasBuildInstanceCount == numInstances);
         }
 
         auto geometry = vk::AccelerationStructureGeometryKHR()
@@ -959,6 +999,8 @@ namespace nvrhi::vulkan
         std::array<const vk::AccelerationStructureBuildRangeInfoKHR*, 1> buildRangeArrays = { buildRanges.data() };
 
         m_CurrentCmdBuf->cmdBuf.buildAccelerationStructuresKHR(buildInfos, buildRangeArrays);
+        as->tlasBuilt = true;
+        as->lastTlasBuildInstanceCount = numInstances;
     }
 
     void CommandList::buildTopLevelAccelStruct(rt::IAccelStruct* _as, const rt::InstanceDesc* pInstances, size_t numInstances, rt::AccelStructBuildFlags buildFlags)
@@ -1002,7 +1044,13 @@ namespace nvrhi::vulkan
         }
 
 #ifdef NVRHI_WITH_RTXMU
-        m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(m_CurrentCmdBuf->cmdBuf, m_CurrentCmdBuf->rtxmuBuildIds);
+        if (!m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.empty())
+        {
+            m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(
+                m_CurrentCmdBuf->cmdBuf,
+                m_CurrentCmdBuf->rtxmuPendingUavBarrierIds);
+            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.clear();
+        }
 #endif
 
         uint64_t currentVersion = MakeVersion(m_CurrentCmdBuf->recordingID, m_CommandListParameters.queueType, false);
@@ -1021,7 +1069,13 @@ namespace nvrhi::vulkan
 
         if (m_EnableAutomaticBarriers)
         {
-            requireBufferState(as->dataBuffer, nvrhi::ResourceStates::AccelStructWrite);
+            const bool performUpdate =
+                (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != 0;
+            const auto targetState = performUpdate
+                ? (nvrhi::ResourceStates::AccelStructBuildBlas
+                    | nvrhi::ResourceStates::AccelStructWrite)
+                : nvrhi::ResourceStates::AccelStructWrite;
+            requireBufferState(as->dataBuffer, targetState);
             m_BindingStatesDirty = true;
         }
         commitBarriers();
@@ -1045,13 +1099,24 @@ namespace nvrhi::vulkan
         // tracker cannot express the BLAS-build -> TLAS-build dependency.
         // The instance-buffer path is used by GPU-packed TLAS descriptors and
         // may consume BLASes built earlier in this same command buffer.
-        m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(
-            m_CurrentCmdBuf->cmdBuf, m_CurrentCmdBuf->rtxmuBuildIds);
+        if (!m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.empty())
+        {
+            m_Context.rtxMemUtil->PopulateUAVBarriersCommandList(
+                m_CurrentCmdBuf->cmdBuf,
+                m_CurrentCmdBuf->rtxmuPendingUavBarrierIds);
+            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.clear();
+        }
 #endif
 
         if (m_EnableAutomaticBarriers)
         {
-            requireBufferState(as->dataBuffer, nvrhi::ResourceStates::AccelStructWrite);
+            const bool performUpdate =
+                (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != 0;
+            const auto targetState = performUpdate
+                ? (nvrhi::ResourceStates::AccelStructBuildBlas
+                    | nvrhi::ResourceStates::AccelStructWrite)
+                : nvrhi::ResourceStates::AccelStructWrite;
+            requireBufferState(as->dataBuffer, targetState);
             requireBufferState(instanceBuffer, nvrhi::ResourceStates::AccelStructBuildInput);
             m_BindingStatesDirty = true;
         }

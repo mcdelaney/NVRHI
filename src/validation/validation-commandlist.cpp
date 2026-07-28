@@ -1894,6 +1894,12 @@ namespace nvrhi::validation
             return;
         }
 
+        if (wrapper)
+        {
+            wrapper->wasBuilt = true;
+            wrapper->buildInstances = numInstances;
+        }
+
         m_CommandList->buildTopLevelAccelStructFromBuffer(underlyingAS, instanceBuffer, instanceBufferOffset, numInstances, buildFlags);
     }
 
