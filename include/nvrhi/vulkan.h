@@ -150,6 +150,43 @@ namespace nvrhi::vulkan
         uint32_t timestampValidBits = 0;
     };
 
+    // Byte accounting for the device-local and host-visible pools NVRHI owns
+    // internally, which no public getter otherwise reaches. An application that
+    // budgets VRAM cannot see any of this through the resource handles it holds,
+    // so it presents as untracked driver overhead.
+    struct InternalMemoryStats
+    {
+        // Per-CommandList UploadManager (host-visible) and ScratchManager
+        // (device-local) chunk pools, summed over every live command list.
+        // A pool never releases memory before its command list is destroyed --
+        // submitChunks only recycles chunk versions and there is no trim path --
+        // so each value is a high-water mark rather than a live usage.
+        uint64_t uploadChunkBytes = 0;
+        uint64_t scratchChunkBytes = 0;
+        uint32_t uploadChunkCount = 0;
+        uint32_t scratchChunkCount = 0;
+
+        // RTXMU block suballocators, device-local. Zero unless the library was
+        // built with NVRHI_WITH_RTXMU. These are the block reservations, so
+        // they include the slack inside each block -- which summing the
+        // per-AccelStruct logical sizes does not see.
+        //
+        // NOT thread-safe against concurrent acceleration-structure work.
+        // rtxmu::Suballocator guards allocate/free with an internal mutex but
+        // its getStats/getSize/getFragmentation walk m_blocks and each block's
+        // freeSubBlocks WITHOUT taking it, so a query racing a BLAS build can
+        // walk a vector mid-reallocation rather than merely read a stale total.
+        // Query these from a thread that is not recording or executing RT work.
+        uint64_t rtxmuResultBytes = 0;
+        uint64_t rtxmuTransientResultBytes = 0;
+        uint64_t rtxmuCompactionBytes = 0;
+        // Unused bytes within the three pools above; already counted in them.
+        uint64_t rtxmuUnusedBytes = 0;
+
+        uint64_t chunkTotal() const { return uploadChunkBytes + scratchChunkBytes; }
+        uint64_t rtxmuTotal() const { return rtxmuResultBytes + rtxmuTransientResultBytes + rtxmuCompactionBytes; }
+    };
+
     class IDevice : public nvrhi::IDevice
     {
     public:
@@ -356,6 +393,12 @@ namespace nvrhi::vulkan
         // pollTimerQuery has resolved the query.
         virtual bool getTimerQueryTimestampRange(
             ITimerQuery* query, TimerQueryTimestampRange& range) = 0;
+
+        // Bytes held in NVRHI-internal pools that no other query reports. The
+        // chunk counters are lock-free atomics; the RTXMU pools walk their
+        // block lists, so treat this as a diagnostic call rather than a
+        // per-frame one.
+        virtual InternalMemoryStats getInternalMemoryStats() = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

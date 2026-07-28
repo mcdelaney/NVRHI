@@ -375,6 +375,48 @@ namespace nvrhi::vulkan
         return GraphicsAPI::VULKAN;
     }
 
+    void Device::accountChunkPool(bool isScratch, int64_t bytes, int32_t chunks)
+    {
+        // Relaxed: these counters are diagnostic totals with no ordering
+        // relationship to the allocations they describe.
+        if (isScratch)
+        {
+            m_ScratchChunkBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+            m_ScratchChunkCount.fetch_add(static_cast<uint32_t>(chunks), std::memory_order_relaxed);
+        }
+        else
+        {
+            m_UploadChunkBytes.fetch_add(static_cast<uint64_t>(bytes), std::memory_order_relaxed);
+            m_UploadChunkCount.fetch_add(static_cast<uint32_t>(chunks), std::memory_order_relaxed);
+        }
+    }
+
+    InternalMemoryStats Device::getInternalMemoryStats()
+    {
+        InternalMemoryStats stats;
+        stats.uploadChunkBytes = m_UploadChunkBytes.load(std::memory_order_relaxed);
+        stats.scratchChunkBytes = m_ScratchChunkBytes.load(std::memory_order_relaxed);
+        stats.uploadChunkCount = m_UploadChunkCount.load(std::memory_order_relaxed);
+        stats.scratchChunkCount = m_ScratchChunkCount.load(std::memory_order_relaxed);
+
+#ifdef NVRHI_WITH_RTXMU
+        if (m_Context.rtxMemUtil)
+        {
+            // getStats walks each pool's block list, so this is the expensive
+            // half of the query.
+            const rtxmu::Stats result = m_Context.rtxMemUtil->GetResultPoolMemoryStats();
+            const rtxmu::Stats transient = m_Context.rtxMemUtil->GetTransientResultPoolMemoryStats();
+            const rtxmu::Stats compaction = m_Context.rtxMemUtil->GetCompactionPoolMemoryStats();
+            stats.rtxmuResultBytes = result.totalResidentMemorySize;
+            stats.rtxmuTransientResultBytes = transient.totalResidentMemorySize;
+            stats.rtxmuCompactionBytes = compaction.totalResidentMemorySize;
+            stats.rtxmuUnusedBytes = result.unusedSize + transient.unusedSize + compaction.unusedSize;
+        }
+#endif
+
+        return stats;
+    }
+
     bool Device::waitForIdle()
     {
         // vkDeviceWaitIdle is externally synchronized against every VkQueue

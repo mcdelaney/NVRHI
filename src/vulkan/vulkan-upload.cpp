@@ -26,6 +26,17 @@
 namespace nvrhi::vulkan
 {
 
+    UploadManager::~UploadManager()
+    {
+        // Chunks are released only here, all at once, so this manager's own
+        // running totals are exactly what to return to the device counters.
+        if (m_AllocatedMemory != 0 || m_ChunkCount != 0)
+        {
+            m_Device->accountChunkPool(m_IsScratchBuffer,
+                -static_cast<int64_t>(m_AllocatedMemory), -static_cast<int32_t>(m_ChunkCount));
+        }
+    }
+
     std::shared_ptr<BufferChunk> UploadManager::CreateChunk(uint64_t size)
     {
         std::shared_ptr<BufferChunk> chunk = std::make_shared<BufferChunk>();
@@ -128,6 +139,13 @@ namespace nvrhi::vulkan
                 return false;
 
             m_CurrentChunk = CreateChunk(sizeToAllocate);
+
+            // Charge the chunk. Without this m_AllocatedMemory stays at zero and
+            // the m_MemoryLimit test above can never fire, which made
+            // CommandListParameters::scratchMaxMemory dead.
+            m_AllocatedMemory += sizeToAllocate;
+            ++m_ChunkCount;
+            m_Device->accountChunkPool(m_IsScratchBuffer, static_cast<int64_t>(sizeToAllocate), 1);
         }
 
         m_CurrentChunk->version = currentVersion;

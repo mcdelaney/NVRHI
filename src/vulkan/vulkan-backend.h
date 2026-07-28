@@ -27,6 +27,7 @@
 #include <nvrhi/common/aftermath.h>
 #include "../common/state-tracking.h"
 #include "../common/versioning.h"
+#include <atomic>
 #include <mutex>
 #include <list>
 #include <unordered_set>
@@ -1147,6 +1148,9 @@ namespace nvrhi::vulkan
             , m_IsScratchBuffer(isScratchBuffer)
         { }
 
+        // Returns this manager's chunk bytes to the device-wide counters.
+        ~UploadManager();
+
         std::shared_ptr<BufferChunk> CreateChunk(uint64_t size);
 
         bool suballocateBuffer(uint64_t size, Buffer** pBuffer, uint64_t* pOffset, void** pCpuVA, uint64_t currentVersion, uint32_t alignment = 256);
@@ -1156,7 +1160,12 @@ namespace nvrhi::vulkan
         Device* m_Device;
         uint64_t m_DefaultChunkSize = 0;
         uint64_t m_MemoryLimit = 0;
+        // Sum of the sizes of every chunk this manager has minted. Chunks are
+        // recycled by version but never freed before the manager is destroyed,
+        // so this only grows -- which is what makes m_MemoryLimit meaningful
+        // and what the destructor can subtract wholesale.
         uint64_t m_AllocatedMemory = 0;
+        uint32_t m_ChunkCount = 0;
         bool m_IsScratchBuffer = false;
 
         std::list<std::shared_ptr<BufferChunk>> m_ChunkPool;
@@ -1283,6 +1292,12 @@ namespace nvrhi::vulkan
         void resetTimerQuery(ITimerQuery* query) override;
         bool getTimerQueryTimestampRange(
             ITimerQuery* query, TimerQueryTimestampRange& range) override;
+
+        InternalMemoryStats getInternalMemoryStats() override;
+
+        // Called by UploadManager as it mints and releases chunks. `bytes` and
+        // `chunks` are signed deltas.
+        void accountChunkPool(bool isScratch, int64_t bytes, int32_t chunks);
 
         GraphicsAPI getGraphicsAPI() override;
 
@@ -1421,6 +1436,14 @@ namespace nvrhi::vulkan
         
         vk::QueryPool m_TimerQueryPool = nullptr;
         utils::BitSetAllocator m_TimerQueryAllocator;
+
+        // Chunk-pool bytes summed across every live CommandList's UploadManager
+        // and ScratchManager. Atomic rather than under m_Mutex: command lists on
+        // worker threads mint chunks while the reporting thread reads.
+        std::atomic<uint64_t> m_UploadChunkBytes {0};
+        std::atomic<uint64_t> m_ScratchChunkBytes {0};
+        std::atomic<uint32_t> m_UploadChunkCount {0};
+        std::atomic<uint32_t> m_ScratchChunkCount {0};
 
         std::mutex m_Mutex;
 
