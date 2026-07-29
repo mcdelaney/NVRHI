@@ -183,8 +183,29 @@ namespace nvrhi::vulkan
         // Unused bytes within the three pools above; already counted in them.
         uint64_t rtxmuUnusedBytes = 0;
 
+        // Live totals of what vkAllocateMemory was ACTUALLY asked for, split by
+        // heap kind, plus the live allocation count. NVRHI performs one
+        // vkAllocateMemory per resource, so these are the sum of each resource's
+        // VkMemoryRequirements::size -- which exceeds the logical size implied by
+        // its TextureDesc/BufferDesc by alignment and tiling padding.
+        //
+        // Two things an app cannot otherwise measure:
+        //  - deviceLocalAllocatedBytes minus the app's own descriptor-derived sum
+        //    is the padding, which no per-subsystem byte getter can see.
+        //  - VK_EXT_memory_budget's device usage minus deviceLocalAllocatedBytes
+        //    is everything allocated OUTSIDE NVRHI: driver overhead, pipeline and
+        //    shader objects, descriptor pools, and vendor SDKs (DLSS/NGX).
+        //
+        // These are live (decremented on free), unlike the chunk pools above,
+        // which are high-water marks. Includes the chunk pools themselves, since
+        // those also allocate through this path.
+        uint64_t deviceLocalAllocatedBytes = 0;
+        uint64_t hostVisibleAllocatedBytes = 0;
+        uint32_t liveAllocationCount = 0;
+
         uint64_t chunkTotal() const { return uploadChunkBytes + scratchChunkBytes; }
         uint64_t rtxmuTotal() const { return rtxmuResultBytes + rtxmuTransientResultBytes + rtxmuCompactionBytes; }
+        uint64_t allocatedTotal() const { return deviceLocalAllocatedBytes + hostVisibleAllocatedBytes; }
     };
 
     class IDevice : public nvrhi::IDevice

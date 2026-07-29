@@ -156,12 +156,43 @@ namespace nvrhi::vulkan
                             .setMemoryTypeIndex(memTypeIndex)
                             .setPNext(pNext);
 
-        return m_Context.device.allocateMemory(&allocInfo, m_Context.allocationCallbacks, &res->memory);
+        const vk::Result allocResult = m_Context.device.allocateMemory(
+            &allocInfo, m_Context.allocationCallbacks, &res->memory);
+
+        // Charge only on success: a failed allocation owns no memory, and
+        // freeMemory will not be reached to decrement it.
+        if (allocResult == vk::Result::eSuccess)
+        {
+            res->allocatedSize = static_cast<uint64_t>(memRequirements.size);
+            res->allocatedDeviceLocal =
+                static_cast<bool>(memPropertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal);
+            if (res->allocatedDeviceLocal)
+                m_DeviceLocalAllocatedBytes.fetch_add(res->allocatedSize, std::memory_order_relaxed);
+            else
+                m_HostVisibleAllocatedBytes.fetch_add(res->allocatedSize, std::memory_order_relaxed);
+            m_LiveAllocationCount.fetch_add(1u, std::memory_order_relaxed);
+        }
+
+        return allocResult;
     }
 
     void VulkanAllocator::freeMemory(MemoryResource *res) const
     {
         assert(res->managed);
+
+        // Decrement the same counter the allocation charged. The heap kind is
+        // stored on the resource because it cannot be recovered from a
+        // vk::DeviceMemory handle after the fact.
+        if (res->allocatedSize != 0)
+        {
+            if (res->allocatedDeviceLocal)
+                m_DeviceLocalAllocatedBytes.fetch_sub(res->allocatedSize, std::memory_order_relaxed);
+            else
+                m_HostVisibleAllocatedBytes.fetch_sub(res->allocatedSize, std::memory_order_relaxed);
+            m_LiveAllocationCount.fetch_sub(1u, std::memory_order_relaxed);
+            res->allocatedSize = 0;
+            res->allocatedDeviceLocal = false;
+        }
 
         m_Context.device.freeMemory(res->memory, m_Context.allocationCallbacks);
         res->memory = vk::DeviceMemory(nullptr);

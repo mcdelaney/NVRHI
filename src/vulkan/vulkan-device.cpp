@@ -398,6 +398,11 @@ namespace nvrhi::vulkan
         stats.scratchChunkBytes = m_ScratchChunkBytes.load(std::memory_order_relaxed);
         stats.uploadChunkCount = m_UploadChunkCount.load(std::memory_order_relaxed);
         stats.scratchChunkCount = m_ScratchChunkCount.load(std::memory_order_relaxed);
+        // Live vkAllocateMemory totals. Cheap (three relaxed loads) unlike the
+        // RTXMU half below, which walks block lists.
+        stats.deviceLocalAllocatedBytes = m_Allocator.getDeviceLocalAllocatedBytes();
+        stats.hostVisibleAllocatedBytes = m_Allocator.getHostVisibleAllocatedBytes();
+        stats.liveAllocationCount = m_Allocator.getLiveAllocationCount();
 
 #ifdef NVRHI_WITH_RTXMU
         if (m_Context.rtxMemUtil)

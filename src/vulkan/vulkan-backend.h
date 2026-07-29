@@ -431,6 +431,16 @@ namespace nvrhi::vulkan
     public:
         bool managed = true;
         vk::DeviceMemory memory;
+        // Size actually passed to vkAllocateMemory, i.e. VkMemoryRequirements::size
+        // for this resource -- NOT the logical size implied by its descriptor. The
+        // two differ by alignment and tiling padding, which is invisible to any
+        // caller computing bytes from a TextureDesc/BufferDesc. Retained so
+        // freeMemory can decrement the running total; 0 when unmanaged.
+        uint64_t allocatedSize = 0;
+        // Which of the two running totals this allocation was charged to. Stored
+        // rather than re-derived: the heap kind cannot be recovered from a
+        // vk::DeviceMemory handle once allocated.
+        bool allocatedDeviceLocal = false;
     };
 
     class VulkanAllocator
@@ -455,8 +465,30 @@ namespace nvrhi::vulkan
             VkBuffer dedicatedBuffer = nullptr) const;
         void freeMemory(MemoryResource* res) const;
 
+        // Live totals of what vkAllocateMemory was actually asked for, split by
+        // heap kind, plus the live allocation count. NVRHI does one
+        // vkAllocateMemory per resource, so comparing deviceLocalAllocatedBytes
+        // against an app's descriptor-derived sum yields the padding an app
+        // cannot otherwise see, and comparing it against VK_EXT_memory_budget's
+        // device usage isolates what is allocated outside NVRHI entirely
+        // (driver, pipelines, descriptor pools, vendor SDKs).
+        //
+        // mutable + atomic: every allocate/free entry point here is const, and
+        // resources are created and destroyed from worker threads while a
+        // reporting thread reads. Relaxed ordering -- diagnostic totals with no
+        // ordering relationship to the allocations they describe.
+        uint64_t getDeviceLocalAllocatedBytes() const
+        { return m_DeviceLocalAllocatedBytes.load(std::memory_order_relaxed); }
+        uint64_t getHostVisibleAllocatedBytes() const
+        { return m_HostVisibleAllocatedBytes.load(std::memory_order_relaxed); }
+        uint32_t getLiveAllocationCount() const
+        { return m_LiveAllocationCount.load(std::memory_order_relaxed); }
+
     private:
         const VulkanContext& m_Context;
+        mutable std::atomic<uint64_t> m_DeviceLocalAllocatedBytes {0};
+        mutable std::atomic<uint64_t> m_HostVisibleAllocatedBytes {0};
+        mutable std::atomic<uint32_t> m_LiveAllocationCount {0};
     };
 
     class Heap : public MemoryResource, public RefCounter<IHeap>
