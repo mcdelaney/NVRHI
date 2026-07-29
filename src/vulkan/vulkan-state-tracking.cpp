@@ -28,6 +28,44 @@ namespace nvrhi::vulkan
 {
     namespace detail
     {
+        // A queue family with neither graphics nor compute capability (the
+        // application's transfer+sparse DMA queue) cannot name shader stages
+        // or shader access in barrier scopes: the VUID-*-07454 family rejects
+        // SHADER_READ/WRITE there even under ALL_COMMANDS, because the queue
+        // contains no shader stage for the access to apply to. Resources
+        // crossing that queue routinely carry ShaderResource/UnorderedAccess
+        // tracked states (their steady state on the graphics side), so widen
+        // any queue-illegal access to the MEMORY_READ/WRITE superset --
+        // spec-legal with any stage scope and strictly more conservative --
+        // and collapse queue-illegal stage bits to ALL_COMMANDS.
+        void sanitizeBarrierScopesForTransferOnlyQueue(
+            vk::PipelineStageFlags2& stages, vk::AccessFlags2& access)
+        {
+            const vk::AccessFlags2 queueLegalAccess =
+                vk::AccessFlagBits2::eTransferRead
+                | vk::AccessFlagBits2::eTransferWrite
+                | vk::AccessFlagBits2::eMemoryRead
+                | vk::AccessFlagBits2::eMemoryWrite
+                | vk::AccessFlagBits2::eHostRead
+                | vk::AccessFlagBits2::eHostWrite;
+            const vk::PipelineStageFlags2 queueLegalStages =
+                vk::PipelineStageFlagBits2::eAllCommands
+                | vk::PipelineStageFlagBits2::eAllTransfer
+                | vk::PipelineStageFlagBits2::eCopy
+                | vk::PipelineStageFlagBits2::eResolve
+                | vk::PipelineStageFlagBits2::eBlit
+                | vk::PipelineStageFlagBits2::eClear
+                | vk::PipelineStageFlagBits2::eTopOfPipe
+                | vk::PipelineStageFlagBits2::eBottomOfPipe
+                | vk::PipelineStageFlagBits2::eHost;
+            if (access & ~queueLegalAccess)
+                access = (access & queueLegalAccess)
+                    | vk::AccessFlagBits2::eMemoryRead
+                    | vk::AccessFlagBits2::eMemoryWrite;
+            if (stages & ~queueLegalStages)
+                stages = vk::PipelineStageFlagBits2::eAllCommands;
+        }
+
         vk::ImageMemoryBarrier2 buildQueueOwnershipImageBarrier(
             vk::Image image,
             const vk::ImageSubresourceRange& subresources,
@@ -802,6 +840,20 @@ namespace nvrhi::vulkan
             return s;
         };
 
+        // Transfer-only recording queue (the DMA queue): shader access/stage
+        // scopes are invalid there regardless of what states the resources
+        // carry -- see sanitizeBarrierScopesForTransferOnlyQueue.
+        Queue* recordingQueue =
+            m_Device->getQueue(m_CommandListParameters.queueType);
+        const bool transferOnlyQueue = recordingQueue
+            && !(recordingQueue->getQueueFlags()
+                & (vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute));
+        auto sanitize = [transferOnlyQueue](
+            vk::PipelineStageFlags2& stages, vk::AccessFlags2& access) {
+            if (transferOnlyQueue)
+                detail::sanitizeBarrierScopesForTransferOnlyQueue(stages, access);
+        };
+
         for (const TextureBarrier& barrier : m_StateTracker.getTextureBarriers())
         {
             Texture* texture = static_cast<Texture*>(barrier.texture);
@@ -827,11 +879,17 @@ namespace nvrhi::vulkan
                 .setLevelCount(barrier.entireTexture ? texture->desc.mipLevels : 1)
                 .setAspectMask(aspectMask);
 
+            vk::PipelineStageFlags2 srcStages = narrowStages(before.stageFlags);
+            vk::PipelineStageFlags2 dstStages = narrowStages(after.stageFlags);
+            vk::AccessFlags2 srcAccess = before.accessMask;
+            vk::AccessFlags2 dstAccess = after.accessMask;
+            sanitize(srcStages, srcAccess);
+            sanitize(dstStages, dstAccess);
             imageBarriers.push_back(vk::ImageMemoryBarrier2()
-                .setSrcAccessMask(before.accessMask)
-                .setDstAccessMask(after.accessMask)
-                .setSrcStageMask(narrowStages(before.stageFlags))
-                .setDstStageMask(narrowStages(after.stageFlags))
+                .setSrcAccessMask(srcAccess)
+                .setDstAccessMask(dstAccess)
+                .setSrcStageMask(srcStages)
+                .setDstStageMask(dstStages)
                 .setOldLayout(before.imageLayout)
                 .setNewLayout(after.imageLayout)
                 .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
@@ -851,11 +909,17 @@ namespace nvrhi::vulkan
 
             Buffer* buffer = static_cast<Buffer*>(barrier.buffer);
 
+            vk::PipelineStageFlags2 srcStages = narrowStages(before.stageFlags);
+            vk::PipelineStageFlags2 dstStages = narrowStages(after.stageFlags);
+            vk::AccessFlags2 srcAccess = before.accessMask;
+            vk::AccessFlags2 dstAccess = after.accessMask;
+            sanitize(srcStages, srcAccess);
+            sanitize(dstStages, dstAccess);
             bufferBarriers.push_back(vk::BufferMemoryBarrier2()
-                .setSrcAccessMask(before.accessMask)
-                .setDstAccessMask(after.accessMask)
-                .setSrcStageMask(narrowStages(before.stageFlags))
-                .setDstStageMask(narrowStages(after.stageFlags))
+                .setSrcAccessMask(srcAccess)
+                .setDstAccessMask(dstAccess)
+                .setSrcStageMask(srcStages)
+                .setDstStageMask(dstStages)
                 .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                 .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                 .setBuffer(buffer->buffer)
@@ -1001,13 +1065,29 @@ namespace nvrhi::vulkan
         const bool sameFamily = sourceQueueFamily == destinationQueueFamily;
         if (release || !sameFamily)
         {
-            const vk::ImageMemoryBarrier2 barrier =
+            vk::ImageMemoryBarrier2 barrier =
                 detail::buildQueueOwnershipImageBarrier(
                     texture->image,
                     makeImageSubresourceRange(texture, subresources),
                     before, after,
                     sourceQueueFamily, destinationQueueFamily,
                     release, sameFamily);
+            // The release/acquire halves need not use matching scopes -- only
+            // families and layouts must pair -- so sanitizing just this
+            // recording queue's half is legal.
+            {
+                Queue* recordingQueue =
+                    m_Device->getQueue(m_CommandListParameters.queueType);
+                if (recordingQueue
+                    && !(recordingQueue->getQueueFlags()
+                        & (vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute)))
+                {
+                    detail::sanitizeBarrierScopesForTransferOnlyQueue(
+                        barrier.srcStageMask, barrier.srcAccessMask);
+                    detail::sanitizeBarrierScopesForTransferOnlyQueue(
+                        barrier.dstStageMask, barrier.dstAccessMask);
+                }
+            }
             vk::DependencyInfo dependencyInfo;
             dependencyInfo.setDependencyFlags(
                 detail::queueOwnershipDependencyFlags(
@@ -1122,12 +1202,27 @@ namespace nvrhi::vulkan
         const bool sameFamily = sourceQueueFamily == destinationQueueFamily;
         if (release || !sameFamily)
         {
-            const vk::BufferMemoryBarrier2 barrier =
+            vk::BufferMemoryBarrier2 barrier =
                 detail::buildQueueOwnershipBufferBarrier(
                     buffer->buffer, buffer->desc.byteSize,
                     before, after,
                     sourceQueueFamily, destinationQueueFamily,
                     release, sameFamily);
+            // See the image ownership path: only this queue's half of the
+            // release/acquire pair needs (or may) be sanitized.
+            {
+                Queue* recordingQueue =
+                    m_Device->getQueue(m_CommandListParameters.queueType);
+                if (recordingQueue
+                    && !(recordingQueue->getQueueFlags()
+                        & (vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute)))
+                {
+                    detail::sanitizeBarrierScopesForTransferOnlyQueue(
+                        barrier.srcStageMask, barrier.srcAccessMask);
+                    detail::sanitizeBarrierScopesForTransferOnlyQueue(
+                        barrier.dstStageMask, barrier.dstAccessMask);
+                }
+            }
             vk::DependencyInfo dependencyInfo;
             dependencyInfo.setDependencyFlags(
                 detail::queueOwnershipDependencyFlags(

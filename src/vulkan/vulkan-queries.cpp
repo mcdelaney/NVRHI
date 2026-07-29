@@ -139,7 +139,25 @@ namespace nvrhi::vulkan
         query->timestampValidBits = timestampValidBits;
         query->queueFamilyIndex = queue->getQueueFamilyIndex();
 
-        m_CurrentCmdBuf->cmdBuf.resetQueryPool(m_Device->getTimerQueryPool(), query->beginQueryIndex, 2);
+        // vkCmdResetQueryPool requires a graphics/compute-capable pool even on
+        // queues where timestamps themselves are valid
+        // (VUID-vkCmdResetQueryPool-commandBuffer-cmdpool): a transfer-only
+        // family (the DMA/sparse queue) supports writeTimestamp but not the
+        // in-command-buffer reset. Reset those slots on the HOST instead --
+        // the application enables the core-1.2 hostQueryReset feature for
+        // exactly this (see its device creation). The query object is not
+        // in flight here: begin/end pairs resolve before reuse.
+        if (queue->getQueueFlags()
+            & (vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute))
+        {
+            m_CurrentCmdBuf->cmdBuf.resetQueryPool(
+                m_Device->getTimerQueryPool(), query->beginQueryIndex, 2);
+        }
+        else
+        {
+            m_Context.device.resetQueryPool(
+                m_Device->getTimerQueryPool(), query->beginQueryIndex, 2);
+        }
         m_CurrentCmdBuf->cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_Device->getTimerQueryPool(), query->beginQueryIndex);
     }
 
