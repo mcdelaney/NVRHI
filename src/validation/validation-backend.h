@@ -280,7 +280,19 @@ namespace nvrhi::validation
         void setPermanentBufferState(IBuffer* buffer, ResourceStates stateBits) override;
 
         void commitBarriers() override;
-        
+
+        // f111-pig: forward the compute-only barrier scope to the wrapped
+        // list (not forwarding would silently keep barriers conservative
+        // under validation — correct but not what an A/B is measuring).
+        void pushComputeOnlyBarrierScope() override
+        {
+            m_CommandList->pushComputeOnlyBarrierScope();
+        }
+        void popComputeOnlyBarrierScope() override
+        {
+            m_CommandList->popComputeOnlyBarrierScope();
+        }
+
         ResourceStates getTextureSubresourceState(ITexture* texture, ArraySlice arraySlice, MipLevel mipLevel) override;
         ResourceStates getBufferState(IBuffer* buffer) override;
 

@@ -3789,6 +3789,23 @@ namespace nvrhi
         // Has no effect on DX11.
         virtual void commitBarriers() = 0;
 
+        // f111-pig: region-scoped compute-only barrier narrowing on the Vulkan
+        // backend. While the scope depth is non-zero, barriers whose stage
+        // scope would be the conservative ALL_COMMANDS (stageless
+        // ShaderResource/UnorderedAccess/ConstantBuffer transitions) narrow to
+        // COMPUTE_SHADER — the same proven transform as
+        // CommandListParameters::collapseComputeOnlyBarrierStages, but gated
+        // to a caller-declared region of a mixed graphics+compute list
+        // instead of the whole list. Access masks and image layouts are left
+        // untouched, so memory visibility and layout transitions are
+        // identical; only the execution-dependency scope narrows. The caller
+        // MUST guarantee every access inside the scope (and every prior
+        // access the region's barriers guard against) is compute or transfer
+        // work — a graphics access inside the scope would be under-
+        // synchronized. Push/pop nest. Default no-op on other backends.
+        virtual void pushComputeOnlyBarrierScope() {}
+        virtual void popComputeOnlyBarrierScope() {}
+
         // Returns the current tracked state of a texture subresource.
         // If the state is not known to the command list, returns ResourceStates::Unknown. Using the texture in this
         // state is not allowed.

@@ -1625,6 +1625,18 @@ namespace nvrhi::vulkan
 
         void commitBarriers() override;
 
+        // f111-pig region-scoped compute-only barrier narrowing (see the
+        // ICommandList declaration for the caller contract).
+        void pushComputeOnlyBarrierScope() override
+        {
+            ++m_ComputeOnlyBarrierScopeDepth;
+        }
+        void popComputeOnlyBarrierScope() override
+        {
+            if (m_ComputeOnlyBarrierScopeDepth > 0)
+                --m_ComputeOnlyBarrierScopeDepth;
+        }
+
         ResourceStates getTextureSubresourceState(ITexture* texture, ArraySlice arraySlice, MipLevel mipLevel) override;
         ResourceStates getBufferState(IBuffer* buffer) override;
 
@@ -1643,6 +1655,9 @@ namespace nvrhi::vulkan
         CommandListResourceStateTracker m_StateTracker;
         bool m_EnableAutomaticBarriers = true;
         bool m_PendingBarriersAreMemoryDependencies = false;
+        // f111-pig: non-zero while inside pushComputeOnlyBarrierScope regions;
+        // reset at open() so a leaked scope cannot poison the next recording.
+        uint32_t m_ComputeOnlyBarrierScopeDepth = 0;
 
         // current internal command buffer
         TrackedCommandBufferPtr m_CurrentCmdBuf = nullptr;
