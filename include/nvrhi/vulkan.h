@@ -490,4 +490,11 @@ namespace nvrhi::vulkan
         uint64_t full_drain_barriers = 0;
     };
     NVRHI_API BarrierStatsSnapshot getThreadBarrierStats();
+
+    // Arms the per-commit barrier dump (PIG_BARRIER_STATS=2 logging) for the
+    // NEXT `commit_count` pipelineBarrier2 emissions on the CALLING thread.
+    // The app arms this at a known steady-state frame; count-based windows
+    // cannot find steady state because loading burns an unknown number of
+    // commits before the profiler's region labels start printing.
+    NVRHI_API void armThreadBarrierDump(uint64_t commit_count);
 }

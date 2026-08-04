@@ -45,6 +45,11 @@ namespace nvrhi::vulkan
             thread_local ThreadBarrierStats stats;
             return stats;
         }
+        inline uint64_t& threadBarrierDumpRemaining()
+        {
+            thread_local uint64_t remaining = 0;
+            return remaining;
+        }
 
         // A queue family with neither graphics nor compute capability (the
         // application's transfer+sparse DMA queue) cannot name shader stages
@@ -967,10 +972,10 @@ namespace nvrhi::vulkan
             // PIG_BARRIER_STATS=2: dump each commit's contents for the first
             // ~2000 commits (a few frames) so the app-side gap labels printed
             // to the same stderr classify every commit by frame region.
-            static const char* dumpEnv = std::getenv("PIG_BARRIER_STATS");
-            static const bool dumpEnabled = dumpEnv && dumpEnv[0] == '2';
-            if (dumpEnabled && stats.commits > 20000 && stats.commits <= 22000)
+            uint64_t& dumpRemaining = detail::threadBarrierDumpRemaining();
+            if (dumpRemaining > 0)
             {
+                --dumpRemaining;
                 fprintf(stderr, "[BARRIER-DUMP] commit#%llu\n",
                     (unsigned long long)stats.commits);
                 size_t bi = 0;
@@ -1024,6 +1029,11 @@ namespace nvrhi::vulkan
         endRenderPass();
 
         commitBarriersInternal();
+    }
+
+    void armThreadBarrierDump(uint64_t commit_count)
+    {
+        detail::threadBarrierDumpRemaining() = commit_count;
     }
 
     BarrierStatsSnapshot getThreadBarrierStats()
