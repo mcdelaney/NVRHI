@@ -28,6 +28,22 @@ namespace nvrhi::vulkan
 {
     namespace detail
     {
+        // f111-pig barrier stats backing store (see getThreadBarrierStats in
+        // nvrhi/vulkan.h). Thread-local: each recording thread counts only its
+        // own emissions, so render-thread delta sampling attributes exactly.
+        struct ThreadBarrierStats
+        {
+            uint64_t commits = 0;
+            uint64_t image_barriers = 0;
+            uint64_t buffer_barriers = 0;
+            uint64_t full_drain_barriers = 0;
+        };
+        inline ThreadBarrierStats& threadBarrierStats()
+        {
+            thread_local ThreadBarrierStats stats;
+            return stats;
+        }
+
         // A queue family with neither graphics nor compute capability (the
         // application's transfer+sparse DMA queue) cannot name shader stages
         // or shader access in barrier scopes: the VUID-*-07454 family rejects
@@ -830,7 +846,11 @@ namespace nvrhi::vulkan
         // dependencies; access masks and image layouts are left untouched, so the
         // memory visibility and layout transitions are identical. Other stage
         // bits (e.g. eTransfer from CopyDest) are preserved as-is.
-        const bool collapseToCompute = m_CommandListParameters.collapseComputeOnlyBarrierStages;
+        // Whole-list opt-in OR an active f111-pig caller-declared compute-only
+        // region (pushComputeOnlyBarrierScope) — identical transform either way.
+        const bool collapseToCompute =
+            m_CommandListParameters.collapseComputeOnlyBarrierStages
+            || m_ComputeOnlyBarrierScopeDepth > 0;
         auto narrowStages = [collapseToCompute](vk::PipelineStageFlags2 s) -> vk::PipelineStageFlags2 {
             if (collapseToCompute && (s & vk::PipelineStageFlagBits2::eAllCommands))
             {
@@ -934,6 +954,25 @@ namespace nvrhi::vulkan
             dep_info.setBufferMemoryBarriers(bufferBarriers);
 
             m_CurrentCmdBuf->cmdBuf.pipelineBarrier2(dep_info);
+
+            // f111-pig barrier stats (see getThreadBarrierStats in vulkan.h):
+            // count the emission and the full-pipeline drains among it.
+            detail::ThreadBarrierStats& stats = detail::threadBarrierStats();
+            stats.commits += 1;
+            stats.image_barriers += imageBarriers.size();
+            stats.buffer_barriers += bufferBarriers.size();
+            for (const vk::ImageMemoryBarrier2& b : imageBarriers)
+            {
+                if ((b.srcStageMask & vk::PipelineStageFlagBits2::eAllCommands)
+                    || (b.dstStageMask & vk::PipelineStageFlagBits2::eAllCommands))
+                    stats.full_drain_barriers += 1;
+            }
+            for (const vk::BufferMemoryBarrier2& b : bufferBarriers)
+            {
+                if ((b.srcStageMask & vk::PipelineStageFlagBits2::eAllCommands)
+                    || (b.dstStageMask & vk::PipelineStageFlagBits2::eAllCommands))
+                    stats.full_drain_barriers += 1;
+            }
         }
 
         m_StateTracker.clearBarriers();
@@ -948,6 +987,17 @@ namespace nvrhi::vulkan
         endRenderPass();
 
         commitBarriersInternal();
+    }
+
+    BarrierStatsSnapshot getThreadBarrierStats()
+    {
+        const detail::ThreadBarrierStats& s = detail::threadBarrierStats();
+        BarrierStatsSnapshot out;
+        out.commits = s.commits;
+        out.image_barriers = s.image_barriers;
+        out.buffer_barriers = s.buffer_barriers;
+        out.full_drain_barriers = s.full_drain_barriers;
+        return out;
     }
 
     bool CommandList::recordTextureQueueOwnershipTransfer(

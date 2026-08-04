@@ -470,8 +470,24 @@ namespace nvrhi::vulkan
     };
 
     NVRHI_API DeviceHandle createDevice(const DeviceDesc& desc);
-   
+
     NVRHI_API VkFormat convertFormat(nvrhi::Format format);
 
     NVRHI_API const char* resultToString(VkResult result);
+
+    // Thread-local barrier emission counters (f111-pig): monotonically
+    // increasing totals of what THIS thread's command lists emitted via
+    // vkCmdPipelineBarrier2. Thread-local so a render thread sampling deltas
+    // around its recording regions attributes its own batches exactly, without
+    // contamination from worker-thread uploads. `full_drain_barriers` counts
+    // barriers whose source or destination stage scope is ALL_COMMANDS — the
+    // full pipeline drains that empty the machine.
+    struct BarrierStatsSnapshot
+    {
+        uint64_t commits = 0;            // pipelineBarrier2 calls
+        uint64_t image_barriers = 0;
+        uint64_t buffer_barriers = 0;
+        uint64_t full_drain_barriers = 0;
+    };
+    NVRHI_API BarrierStatsSnapshot getThreadBarrierStats();
 }
