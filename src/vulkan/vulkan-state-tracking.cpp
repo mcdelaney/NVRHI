@@ -23,6 +23,8 @@
 #include "vulkan-backend.h"
 #include "vulkan-queue-utils.h"
 #include <nvrhi/common/misc.h>
+#include <cstdio>
+#include <cstdlib>
 
 namespace nvrhi::vulkan
 {
@@ -961,6 +963,41 @@ namespace nvrhi::vulkan
             stats.commits += 1;
             stats.image_barriers += imageBarriers.size();
             stats.buffer_barriers += bufferBarriers.size();
+
+            // PIG_BARRIER_STATS=2: dump each commit's contents for the first
+            // ~2000 commits (a few frames) so the app-side gap labels printed
+            // to the same stderr classify every commit by frame region.
+            static const char* dumpEnv = std::getenv("PIG_BARRIER_STATS");
+            static const bool dumpEnabled = dumpEnv && dumpEnv[0] == '2';
+            if (dumpEnabled && stats.commits <= 2000)
+            {
+                fprintf(stderr, "[BARRIER-DUMP] commit#%llu\n",
+                    (unsigned long long)stats.commits);
+                size_t bi = 0;
+                for (const TextureBarrier& tb : m_StateTracker.getTextureBarriers())
+                {
+                    const vk::ImageMemoryBarrier2& b = imageBarriers[bi++];
+                    fprintf(stderr,
+                        "  img '%s' 0x%llx->0x%llx stages 0x%llx->0x%llx\n",
+                        static_cast<Texture*>(tb.texture)->desc.debugName.c_str(),
+                        (unsigned long long)tb.stateBefore,
+                        (unsigned long long)tb.stateAfter,
+                        (unsigned long long)(VkPipelineStageFlags2)b.srcStageMask,
+                        (unsigned long long)(VkPipelineStageFlags2)b.dstStageMask);
+                }
+                bi = 0;
+                for (const BufferBarrier& bb : m_StateTracker.getBufferBarriers())
+                {
+                    const vk::BufferMemoryBarrier2& b = bufferBarriers[bi++];
+                    fprintf(stderr,
+                        "  buf '%s' 0x%llx->0x%llx stages 0x%llx->0x%llx\n",
+                        static_cast<Buffer*>(bb.buffer)->desc.debugName.c_str(),
+                        (unsigned long long)bb.stateBefore,
+                        (unsigned long long)bb.stateAfter,
+                        (unsigned long long)(VkPipelineStageFlags2)b.srcStageMask,
+                        (unsigned long long)(VkPipelineStageFlags2)b.dstStageMask);
+                }
+            }
             for (const vk::ImageMemoryBarrier2& b : imageBarriers)
             {
                 if ((b.srcStageMask & vk::PipelineStageFlagBits2::eAllCommands)
