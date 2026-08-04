@@ -969,7 +969,7 @@ namespace nvrhi::vulkan
             // to the same stderr classify every commit by frame region.
             static const char* dumpEnv = std::getenv("PIG_BARRIER_STATS");
             static const bool dumpEnabled = dumpEnv && dumpEnv[0] == '2';
-            if (dumpEnabled && stats.commits <= 2000)
+            if (dumpEnabled && stats.commits > 20000 && stats.commits <= 22000)
             {
                 fprintf(stderr, "[BARRIER-DUMP] commit#%llu\n",
                     (unsigned long long)stats.commits);
