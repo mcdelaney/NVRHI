@@ -858,10 +858,27 @@ namespace nvrhi::vulkan
         const bool collapseToCompute =
             m_CommandListParameters.collapseComputeOnlyBarrierStages
             || m_ComputeOnlyBarrierScopeDepth > 0;
-        auto narrowStages = [collapseToCompute](vk::PipelineStageFlags2 s) -> vk::PipelineStageFlags2 {
-            if (collapseToCompute && (s & vk::PipelineStageFlagBits2::eAllCommands))
+        // f111-pig: with the shader-state stage substitution active,
+        // "unqualified" barriers carry the full shader-stage union instead of
+        // eAllCommands. Collapse that signature too — but ONLY the complete
+        // union (per-call qualified scopes are proper subsets and must pass
+        // through untouched, exactly as with the eAllCommands check).
+        const vk::PipelineStageFlags2 shaderUnion =
+            internalShaderStateStageUnion();
+        const bool unionActive = shaderUnion
+            != vk::PipelineStageFlags2(vk::PipelineStageFlagBits2::eAllCommands);
+        auto narrowStages = [collapseToCompute, shaderUnion, unionActive](
+            vk::PipelineStageFlags2 s) -> vk::PipelineStageFlags2 {
+            if (!collapseToCompute)
+                return s;
+            if (s & vk::PipelineStageFlagBits2::eAllCommands)
             {
                 s &= ~vk::PipelineStageFlags2(vk::PipelineStageFlagBits2::eAllCommands);
+                s |= vk::PipelineStageFlagBits2::eComputeShader;
+            }
+            if (unionActive && (s & shaderUnion) == shaderUnion)
+            {
+                s &= ~shaderUnion;
                 s |= vk::PipelineStageFlagBits2::eComputeShader;
             }
             return s;

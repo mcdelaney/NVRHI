@@ -85,6 +85,8 @@ namespace nvrhi::vulkan
 
     vk::SamplerAddressMode convertSamplerAddressMode(SamplerAddressMode mode);
     vk::PipelineStageFlags2 convertShaderTypeToPipelineStageFlags(ShaderType shaderType);
+    // f111-pig: the app-configured shader-state stage union (vulkan-constants.cpp).
+    vk::PipelineStageFlags2 internalShaderStateStageUnion();
     ShaderType resolveBindingBarrierShaderStages(
         ShaderType layoutVisibility, ShaderType pipelineStages);
     vk::ShaderStageFlagBits convertShaderTypeToShaderStageFlagBits(ShaderType shaderType);

@@ -233,6 +233,38 @@ namespace nvrhi::vulkan
 #endif
     }
 
+    // f111-pig: the shader-state stage substitution. ConstantBuffer /
+    // ShaderResource / UnorderedAccess carry SHADER-ONLY access masks
+    // (UNIFORM_READ / SHADER_READ / SHADER_READ|WRITE), yet the conservative
+    // map pairs them with ALL_COMMANDS stage scopes — so every unqualified
+    // barrier on those states drains transfers, indirect fetches, raster
+    // attachment work and presents that can never touch the resource through
+    // those accesses. The application declares its enabled shader-stage
+    // union ONCE (setShaderStateStageUnion, from the features it actually
+    // enabled — stage bits whose feature is off violate the sync2 VUs), and
+    // convertResourceState substitutes it for the eAllCommands bit whenever
+    // a shader state contributed and no per-call qualification narrowed the
+    // scope further. Default eAllCommands = bit-identical legacy behavior.
+    static vk::PipelineStageFlags2 g_ShaderStateStageUnion =
+        vk::PipelineStageFlagBits2::eAllCommands;
+
+    void setShaderStateStageUnion(const VkPipelineStageFlags2 stage_union)
+    {
+        g_ShaderStateStageUnion = stage_union
+            ? vk::PipelineStageFlags2(stage_union)
+            : vk::PipelineStageFlags2(vk::PipelineStageFlagBits2::eAllCommands);
+    }
+
+    VkPipelineStageFlags2 getShaderStateStageUnion()
+    {
+        return static_cast<VkPipelineStageFlags2>(g_ShaderStateStageUnion);
+    }
+
+    vk::PipelineStageFlags2 internalShaderStateStageUnion()
+    {
+        return g_ShaderStateStageUnion;
+    }
+
     static const ResourceStateMapping g_ResourceStateMap[] =
     {
         { ResourceStates::Common,
@@ -447,6 +479,26 @@ namespace nvrhi::vulkan
                     result.stageFlags |= qualifiedStages;
                 }
             }
+        }
+
+        // f111-pig: shader-state stage substitution (see
+        // g_ShaderStateStageUnion). If a shader state contributed the
+        // conservative eAllCommands scope and no per-call qualification
+        // narrowed it above, replace that bit with the application's enabled
+        // shader-stage union: the state's access masks are shader-only, so
+        // ordering against transfer/indirect/attachment/present stages is
+        // pure over-synchronization. Present keeps its eAllCommands
+        // contribution untouched (same guard as the qualified narrowing).
+        if (hasAllCommandsShaderState
+            && (state & ResourceStates::Present) == 0
+            && (result.stageFlags & vk::PipelineStageFlagBits2::eAllCommands)
+            && g_ShaderStateStageUnion
+                != vk::PipelineStageFlags2(
+                    vk::PipelineStageFlagBits2::eAllCommands))
+        {
+            result.stageFlags &= ~vk::PipelineStageFlags2(
+                vk::PipelineStageFlagBits2::eAllCommands);
+            result.stageFlags |= g_ShaderStateStageUnion;
         }
 
         return result;

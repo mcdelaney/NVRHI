@@ -497,4 +497,17 @@ namespace nvrhi::vulkan
     // cannot find steady state because loading burns an unknown number of
     // commits before the profiler's region labels start printing.
     NVRHI_API void armThreadBarrierDump(uint64_t commit_count);
+
+    // f111-pig: the shader-state stage substitution. ConstantBuffer /
+    // ShaderResource / UnorderedAccess carry shader-only access masks; the
+    // conservative map nonetheless scoped them at ALL_COMMANDS, so every
+    // unqualified barrier on those states ordered against transfers,
+    // indirect fetches, attachment output and presents — pure
+    // over-synchronization. The application calls this ONCE after device
+    // creation with the union of the pipeline stages its ENABLED features
+    // can actually shade from (stage bits whose feature is off violate the
+    // synchronization2 VUs). Until called (or if called with 0) the legacy
+    // ALL_COMMANDS behavior is preserved bit-for-bit.
+    NVRHI_API void setShaderStateStageUnion(VkPipelineStageFlags2 stage_union);
+    NVRHI_API VkPipelineStageFlags2 getShaderStateStageUnion();
 }
