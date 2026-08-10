@@ -89,6 +89,54 @@ namespace nvrhi::vulkan
                 stages = vk::PipelineStageFlagBits2::eAllCommands;
         }
 
+        // Same problem one capability up: a compute+transfer queue (no graphics
+        // bit) cannot name GRAPHICS stages in a barrier scope — VUID-
+        // vkCmdPipelineBarrier2-srcStageMask-09675 / -dstStageMask-09676.
+        //
+        // This matters because of the f111-pig shader-state stage substitution
+        // (vulkan-constants.cpp): it replaces the conservative eAllCommands
+        // scope with the application's enabled shader-stage union, which
+        // includes VERTEX/FRAGMENT/TASK/MESH. That union is correct on the
+        // graphics queue and illegal on the dedicated compute queue, where
+        // resources routinely carry ShaderResource/UnorderedAccess states from
+        // their graphics-side steady state. Collapse to eAllCommands, exactly as
+        // the transfer-only path does: legal on every queue and strictly more
+        // conservative than the mask it replaces.
+        void sanitizeBarrierScopesForNonGraphicsQueue(
+            vk::PipelineStageFlags2& stages, vk::AccessFlags2& access)
+        {
+            const vk::PipelineStageFlags2 graphicsOnlyStages =
+                vk::PipelineStageFlagBits2::eVertexShader
+                | vk::PipelineStageFlagBits2::eFragmentShader
+                | vk::PipelineStageFlagBits2::eTessellationControlShader
+                | vk::PipelineStageFlagBits2::eTessellationEvaluationShader
+                | vk::PipelineStageFlagBits2::eGeometryShader
+                | vk::PipelineStageFlagBits2::eTaskShaderEXT
+                | vk::PipelineStageFlagBits2::eMeshShaderEXT
+                | vk::PipelineStageFlagBits2::eVertexInput
+                | vk::PipelineStageFlagBits2::eIndexInput
+                | vk::PipelineStageFlagBits2::eVertexAttributeInput
+                | vk::PipelineStageFlagBits2::ePreRasterizationShaders
+                | vk::PipelineStageFlagBits2::eEarlyFragmentTests
+                | vk::PipelineStageFlagBits2::eLateFragmentTests
+                | vk::PipelineStageFlagBits2::eColorAttachmentOutput
+                | vk::PipelineStageFlagBits2::eAllGraphics;
+            const vk::AccessFlags2 graphicsOnlyAccess =
+                vk::AccessFlagBits2::eIndexRead
+                | vk::AccessFlagBits2::eVertexAttributeRead
+                | vk::AccessFlagBits2::eInputAttachmentRead
+                | vk::AccessFlagBits2::eColorAttachmentRead
+                | vk::AccessFlagBits2::eColorAttachmentWrite
+                | vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                | vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+            if (stages & graphicsOnlyStages)
+                stages = vk::PipelineStageFlagBits2::eAllCommands;
+            if (access & graphicsOnlyAccess)
+                access = (access & ~graphicsOnlyAccess)
+                    | vk::AccessFlagBits2::eMemoryRead
+                    | vk::AccessFlagBits2::eMemoryWrite;
+        }
+
         vk::ImageMemoryBarrier2 buildQueueOwnershipImageBarrier(
             vk::Image image,
             const vk::ImageSubresourceRange& subresources,
@@ -892,10 +940,16 @@ namespace nvrhi::vulkan
         const bool transferOnlyQueue = recordingQueue
             && !(recordingQueue->getQueueFlags()
                 & (vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute));
-        auto sanitize = [transferOnlyQueue](
+        // A compute+transfer queue passes the transfer-only test above (it has
+        // eCompute) but still cannot name graphics stages.
+        const bool nonGraphicsQueue = recordingQueue
+            && !(recordingQueue->getQueueFlags() & vk::QueueFlagBits::eGraphics);
+        auto sanitize = [transferOnlyQueue, nonGraphicsQueue](
             vk::PipelineStageFlags2& stages, vk::AccessFlags2& access) {
             if (transferOnlyQueue)
                 detail::sanitizeBarrierScopesForTransferOnlyQueue(stages, access);
+            else if (nonGraphicsQueue)
+                detail::sanitizeBarrierScopesForNonGraphicsQueue(stages, access);
         };
 
         for (const TextureBarrier& barrier : m_StateTracker.getTextureBarriers())
