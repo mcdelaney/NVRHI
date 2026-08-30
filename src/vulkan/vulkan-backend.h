@@ -31,6 +31,7 @@
 #include <mutex>
 #include <list>
 #include <unordered_set>
+#include <unordered_map>
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
@@ -152,6 +153,16 @@ namespace nvrhi::vulkan
     struct RtxMuResources
     {
         std::vector<uint64_t> asBuildsCompleted;
+        // Ids handed to a compaction command list and not yet consumed by
+        // that list's retirement. RTXMU nulls an accel struct's slot when it
+        // is removed AND recycles the id through a FIFO free list, so an id
+        // in flight must not be removed: PopulateCompactionCommandList and
+        // GarbageCollection both dereference the slot, and a recycled id
+        // would silently address a different structure. An AccelStruct
+        // destroyed while its id is in flight defers its removal to the
+        // retirement that drains the count.
+        std::unordered_map<uint64_t, uint32_t> compactionInFlight;
+        std::vector<uint64_t> pendingRemovals;
         std::mutex asListMutex;
     };
 #endif

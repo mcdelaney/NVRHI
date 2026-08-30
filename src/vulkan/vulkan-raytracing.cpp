@@ -23,6 +23,7 @@
 #include "vulkan-backend.h"
 #include <nvrhi/common/misc.h>
 #include <sstream>
+#include <algorithm>
 
 namespace nvrhi::vulkan
 {
@@ -889,6 +890,13 @@ namespace nvrhi::vulkan
 
                 m_CurrentCmdBuf->rtxmuCompactionIds.insert(m_CurrentCmdBuf->rtxmuCompactionIds.end(), m_Context.rtxMuResources->asBuildsCompleted.begin(), m_Context.rtxMuResources->asBuildsCompleted.end());
 
+                // These ids are now in flight on this list: its retirement
+                // dereferences each slot again (GarbageCollection), so an
+                // AccelStruct destroyed before then must defer its removal
+                // rather than null the slot and recycle the id.
+                for (const uint64_t id : m_Context.rtxMuResources->asBuildsCompleted)
+                    ++m_Context.rtxMuResources->compactionInFlight[id];
+
                 m_Context.rtxMuResources->asBuildsCompleted.clear();
             }
         }
@@ -1245,8 +1253,36 @@ namespace nvrhi::vulkan
         bool isManaged = desc.isTopLevel;
         if (!isManaged && rtxmuId != ~0ull)
         {
-            std::vector<uint64_t> delAccel = { rtxmuId };
-            m_Context.rtxMemUtil->RemoveAccelerationStructures(delAccel);
+            std::lock_guard lockGuard(m_Context.rtxMuResources->asListMutex);
+
+            // An id sitting in the completed-builds list has had no
+            // compaction recorded for it yet, so it can simply leave: left
+            // there, the next compactBottomLevelAccelStructs would hand a
+            // removed id to PopulateCompactionCommandList, which
+            // dereferences the (now null) slot — an access violation
+            // reading the entry's requestedCompaction byte.
+            auto& completed = m_Context.rtxMuResources->asBuildsCompleted;
+            completed.erase(
+                std::remove(completed.begin(), completed.end(), rtxmuId),
+                completed.end());
+
+            // An id whose compaction copy is still in flight cannot be
+            // removed at all: the recording list's retirement will
+            // dereference the slot again through GarbageCollection, and
+            // removing it now would also return the id to RTXMU's free list
+            // for the next createAccelStruct to reuse. Defer to the
+            // retirement that drains the count. RTXMU owns every allocation
+            // behind the id until then, so nothing leaks and nothing is
+            // freed early — this object no longer names it either way.
+            if (m_Context.rtxMuResources->compactionInFlight.count(rtxmuId))
+            {
+                m_Context.rtxMuResources->pendingRemovals.push_back(rtxmuId);
+            }
+            else
+            {
+                std::vector<uint64_t> delAccel = { rtxmuId };
+                m_Context.rtxMemUtil->RemoveAccelerationStructures(delAccel);
+            }
             rtxmuId = ~0ull;
         }
 #else

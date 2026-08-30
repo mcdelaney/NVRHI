@@ -543,25 +543,73 @@ namespace nvrhi::vulkan
         {
             if (cb->submissionID <= lastFinishedID)
             {
+#ifdef NVRHI_WITH_RTXMU
+                // BEFORE the clears, which are what can destroy an
+                // AccelStruct: ~AccelStruct takes asListMutex to purge its
+                // id, so holding that mutex across a clear would deadlock on
+                // a non-recursive mutex. Publishing the build ids first is
+                // also what makes the purge correct — an id published after
+                // the structure died would be a removed id nobody can drop.
+                //
+                // Entered only for a list that carried rtxmu work, which is
+                // what keeps the mutex off every retirement and what keeps
+                // this off a device that compiled RTXMU in without enabling
+                // ray tracing (no resources object at all). A deferred
+                // removal cannot strand behind that condition: an id is
+                // deferred only while some list carries its compaction, and
+                // that list's retirement enters here by definition.
+                if (m_Context.rtxMuResources
+                    && (!cb->rtxmuBuildIds.empty() || !cb->rtxmuCompactionIds.empty()))
+                {
+                    std::lock_guard rtxmuLock(m_Context.rtxMuResources->asListMutex);
+                    if (!cb->rtxmuBuildIds.empty())
+                    {
+                        m_Context.rtxMuResources->asBuildsCompleted.insert(
+                            m_Context.rtxMuResources->asBuildsCompleted.end(),
+                            cb->rtxmuBuildIds.begin(), cb->rtxmuBuildIds.end());
+                        cb->rtxmuBuildIds.clear();
+                    }
+                    if (!cb->rtxmuCompactionIds.empty())
+                    {
+                        // This list's copies have landed, so these ids leave
+                        // flight. Drop their counts before GarbageCollection
+                        // so a structure destroyed since can be removed here.
+                        for (const uint64_t id : cb->rtxmuCompactionIds)
+                        {
+                            const auto it = m_Context.rtxMuResources->compactionInFlight.find(id);
+                            if (it == m_Context.rtxMuResources->compactionInFlight.end())
+                                continue;
+                            if (--it->second == 0)
+                                m_Context.rtxMuResources->compactionInFlight.erase(it);
+                        }
+                        m_Context.rtxMemUtil->GarbageCollection(cb->rtxmuCompactionIds);
+                        cb->rtxmuCompactionIds.clear();
+                    }
+
+                    // Structures whose owner died while their compaction was
+                    // in flight: their removal was deferred to whichever
+                    // retirement drains the last count. Unconditional so an
+                    // entry can never strand behind a list that carried no
+                    // compaction ids.
+                    auto& pending = m_Context.rtxMuResources->pendingRemovals;
+                    for (size_t i = 0; i < pending.size();)
+                    {
+                        if (m_Context.rtxMuResources->compactionInFlight.count(pending[i]))
+                        {
+                            ++i;
+                            continue;
+                        }
+                        const std::vector<uint64_t> toRemove = { pending[i] };
+                        m_Context.rtxMemUtil->RemoveAccelerationStructures(toRemove);
+                        pending[i] = pending.back();
+                        pending.pop_back();
+                    }
+                }
+#endif
+
                 cb->referencedResources.clear();
                 cb->referencedStagingBuffers.clear();
                 cb->submissionID = 0;
-
-#ifdef NVRHI_WITH_RTXMU
-                if (!cb->rtxmuBuildIds.empty())
-                {
-                    std::lock_guard rtxmuLock(m_Context.rtxMuResources->asListMutex);
-                    m_Context.rtxMuResources->asBuildsCompleted.insert(
-                        m_Context.rtxMuResources->asBuildsCompleted.end(),
-                        cb->rtxmuBuildIds.begin(), cb->rtxmuBuildIds.end());
-                    cb->rtxmuBuildIds.clear();
-                }
-                if (!cb->rtxmuCompactionIds.empty())
-                {
-                    m_Context.rtxMemUtil->GarbageCollection(cb->rtxmuCompactionIds);
-                    cb->rtxmuCompactionIds.clear();
-                }
-#endif
 
                 queue->returnCommandBufferToPool(std::move(cb));
             }
