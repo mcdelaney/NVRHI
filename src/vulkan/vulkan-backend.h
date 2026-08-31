@@ -341,6 +341,10 @@ namespace nvrhi::vulkan
             ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
             VkSemaphore signalSemaphore = VK_NULL_HANDLE, uint64_t signalValue = 0);
 
+        void updateBufferTileMappings(
+            IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings,
+            VkSemaphore signalSemaphore = VK_NULL_HANDLE, uint64_t signalValue = 0);
+
         uint64_t updateLastFinishedID();
         uint64_t getLastSubmittedID() const { return m_LastSubmittedID; }
         uint64_t getLastFinishedID() const { return m_LastFinishedID; }
@@ -1302,6 +1306,11 @@ namespace nvrhi::vulkan
         void updateTextureTileMappings(ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue = CommandQueue::Graphics) override;
         void updateTextureTileMappingsSignal(
             ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings,
+            CommandQueue executionQueue, VkSemaphore signalSemaphore, uint64_t signalValue) override;
+
+        void updateBufferTileMappings(IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue = CommandQueue::Graphics) override;
+        void updateBufferTileMappingsSignal(
+            IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings,
             CommandQueue executionQueue, VkSemaphore signalSemaphore, uint64_t signalValue) override;
 
         SamplerFeedbackTextureHandle createSamplerFeedbackTexture(ITexture* pairedTexture, const SamplerFeedbackTextureDesc& desc) override;

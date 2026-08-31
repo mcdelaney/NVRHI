@@ -279,6 +279,45 @@ namespace nvrhi::validation
         m_Device->updateTextureTileMappings(texture, tileMappings, numTileMappings, executionQueue);
     }
 
+    void DeviceWrapper::updateBufferTileMappings(IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue)
+    {
+        if (buffer == nullptr)
+        {
+            error("updateBufferTileMappings: buffer is NULL");
+            return;
+        }
+
+        if (!buffer->getDesc().isTiled)
+        {
+            std::stringstream ss;
+            ss << "updateBufferTileMappings: buffer " << utils::DebugNameToString(buffer->getDesc().debugName)
+                << " was not created with isTiled = true";
+            error(ss.str());
+            return;
+        }
+
+        for (uint32_t i = 0; i < numTileMappings; i++)
+        {
+            const BufferTilesMapping& mapping = tileMappings[i];
+
+            if (mapping.numBufferRegions != 0 && mapping.tiledBufferRegions == nullptr)
+            {
+                error("updateBufferTileMappings: tiledBufferRegions is NULL with a nonzero numBufferRegions");
+                return;
+            }
+
+            // byteOffsets is only read when a heap is supplied; a null heap is
+            // the decommit and needs no source offsets.
+            if (mapping.heap != nullptr && mapping.numBufferRegions != 0 && mapping.byteOffsets == nullptr)
+            {
+                error("updateBufferTileMappings: byteOffsets is NULL for a mapping that supplies a heap");
+                return;
+            }
+        }
+
+        m_Device->updateBufferTileMappings(buffer, tileMappings, numTileMappings, executionQueue);
+    }
+
     SamplerFeedbackTextureHandle DeviceWrapper::createSamplerFeedbackTexture(ITexture* pairedTexture, const SamplerFeedbackTextureDesc& desc)
     {
         const GraphicsAPI graphicsApi = m_Device->getGraphicsAPI();

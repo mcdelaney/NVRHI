@@ -559,6 +559,20 @@ namespace nvrhi::d3d12
         }
     }
 
+    void Device::updateBufferTileMappings(IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue)
+    {
+        // Reserved buffers map cleanly onto UpdateTileMappings with a linear
+        // D3D12_TILED_RESOURCE_COORDINATE, but nothing in this tree exercises
+        // the DX12 path, so it is left unimplemented rather than shipped
+        // untested. BufferDesc::isTiled is documented Vulkan-only.
+        (void)buffer;
+        (void)tileMappings;
+        (void)numTileMappings;
+        (void)executionQueue;
+
+        utils::NotSupported();
+    }
+
     void Device::updateTextureTileMappings(ITexture* _texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue)
     {
         Queue* queue = getQueue(executionQueue);

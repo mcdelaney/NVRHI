@@ -570,6 +570,77 @@ namespace nvrhi::vulkan
         m_Queue.bindSparse(bindSparseInfo, vk::Fence());
     }
 
+    void Queue::updateBufferTileMappings(
+        IBuffer* _buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings,
+        VkSemaphore signalSemaphore, uint64_t signalValue)
+    {
+        Buffer* buffer = checked_cast<Buffer*>(_buffer);
+
+        std::vector<vk::SparseMemoryBind> sparseMemoryBinds;
+
+        for (uint32_t i = 0; i < numTileMappings; i++)
+        {
+            const BufferTilesMapping& mapping = tileMappings[i];
+            Heap* heap = mapping.heap ? checked_cast<Heap*>(mapping.heap) : nullptr;
+            vk::DeviceMemory deviceMemory = heap ? heap->memory : VK_NULL_HANDLE;
+
+            for (uint32_t j = 0; j < mapping.numBufferRegions; ++j)
+            {
+                const TiledBufferRegion& region = mapping.tiledBufferRegions[j];
+
+                if (region.size == 0)
+                    continue;
+
+                // A null heap is the DECOMMIT: binding VK_NULL_HANDLE memory
+                // over a range releases it. byteOffsets is then meaningless
+                // and callers are allowed to leave it null.
+                sparseMemoryBinds.push_back(vk::SparseMemoryBind()
+                    .setResourceOffset(region.resourceOffset)
+                    .setSize(region.size)
+                    .setMemory(deviceMemory)
+                    .setMemoryOffset(deviceMemory && mapping.byteOffsets ? mapping.byteOffsets[j] : 0));
+            }
+        }
+
+        if (sparseMemoryBinds.empty())
+        {
+            // Still owe the caller its signal even with nothing to bind, or a
+            // waiter parked on this value never wakes. Mirrors the empty-bind
+            // path the texture side relies on.
+            if (signalSemaphore == VK_NULL_HANDLE)
+                return;
+        }
+
+        vk::SparseBufferMemoryBindInfo sparseBufferMemoryBindInfo;
+        vk::BindSparseInfo bindSparseInfo = {};
+        if (!sparseMemoryBinds.empty())
+        {
+            sparseBufferMemoryBindInfo.setBuffer(buffer->buffer);
+            sparseBufferMemoryBindInfo.setBinds(sparseMemoryBinds);
+            bindSparseInfo.setBufferBinds(sparseBufferMemoryBindInfo);
+        }
+
+        // Optional timeline semaphore signal so the caller can order reads of
+        // the affected ranges after the bind without a host stall. This is the
+        // ONLY ordering vkQueueBindSparse offers against later submits.
+        vk::Semaphore signalSems[1];
+        uint64_t signalValues[1];
+        vk::TimelineSemaphoreSubmitInfo timelineInfo;
+        if (signalSemaphore != VK_NULL_HANDLE)
+        {
+            signalSems[0] = signalSemaphore;
+            signalValues[0] = signalValue;
+            bindSparseInfo.setSignalSemaphores(signalSems);
+            timelineInfo.setSignalSemaphoreValues(signalValues);
+            bindSparseInfo.setPNext(&timelineInfo);
+        }
+
+        // VkQueue external-sync: bindSparse on the same VkQueue as submit
+        // (or presentKHR) needs serialization. Same mutex as Queue::submit.
+        std::lock_guard lockGuard(m_Mutex);
+        m_Queue.bindSparse(bindSparseInfo, vk::Fence());
+    }
+
     uint64_t Queue::updateLastFinishedID()
     {
         const uint64_t finished = m_Context.device.getSemaphoreCounterValue(trackingSemaphore);
@@ -641,6 +712,23 @@ namespace nvrhi::vulkan
         Queue& queue = *m_Queues[uint32_t(executionQueue)];
 
         queue.updateTextureTileMappings(texture, tileMappings, numTileMappings, signalSemaphore, signalValue);
+    }
+
+    void Device::updateBufferTileMappings(IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue)
+    {
+        Queue& queue = *m_Queues[uint32_t(executionQueue)];
+
+        queue.updateBufferTileMappings(buffer, tileMappings, numTileMappings);
+    }
+
+    void Device::updateBufferTileMappingsSignal(
+        IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings,
+        CommandQueue executionQueue,
+        VkSemaphore signalSemaphore, uint64_t signalValue)
+    {
+        Queue& queue = *m_Queues[uint32_t(executionQueue)];
+
+        queue.updateBufferTileMappings(buffer, tileMappings, numTileMappings, signalSemaphore, signalValue);
     }
 
     uint64_t Device::queueGetCompletedInstance(CommandQueue queue)

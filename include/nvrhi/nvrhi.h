@@ -608,6 +608,33 @@ namespace nvrhi
         IHeap* heap = nullptr;
     };
 
+    // One contiguous byte range of a sparse buffer (BufferDesc::isTiled), and
+    // where in a heap it is backed from. Offsets and sizes must be multiples
+    // of the buffer's sparse block size, which is the `alignment` that
+    // IDevice::getBufferMemoryRequirements reports for that buffer.
+    struct TiledBufferRegion
+    {
+        // Offset into the BUFFER, in bytes.
+        uint64_t resourceOffset = 0;
+        // Bytes to (de)commit starting there.
+        uint64_t size = 0;
+    };
+
+    // A batch of range bindings against ONE heap. A null heap DECOMMITS every
+    // listed range — the ranges become unbacked, and the memory they used is
+    // free for the caller to hand to another binding. Decommitted ranges must
+    // not be accessed by the GPU: this is partial residency, not sparse
+    // residency with reads of unbound pages defined.
+    struct BufferTilesMapping
+    {
+        TiledBufferRegion* tiledBufferRegions = nullptr;
+        // Byte offset within `heap` backing each region. Ignored (and may be
+        // null) when heap is null, i.e. when decommitting.
+        uint64_t* byteOffsets = nullptr;
+        uint32_t numBufferRegions = 0;
+        IHeap* heap = nullptr;
+    };
+
     struct PackedMipDesc
     {
         uint32_t numStandardMips = 0;
@@ -718,6 +745,18 @@ namespace nvrhi
         // On DX12, the buffer resource is created at the time of memory binding.
         bool isVirtual = false;
 
+        // A sparse (partially resident) buffer: the virtual range is reserved
+        // at creation with no backing memory, and arbitrary sub-ranges are
+        // committed and decommitted later with updateBufferTileMappings.
+        // Unlike isVirtual this is not a deferred whole-buffer bind — the
+        // buffer may be partly resident, and its device address is stable
+        // across every (de)commit, so buffer-device-address consumers keep
+        // working while the backing store grows and shrinks under them.
+        // The buffer-level analogue of TextureDesc::isTiled.
+        // Requires the sparseBinding and sparseResidencyBuffer device
+        // features. Vulkan only; ignored by other backends.
+        bool isTiled = false;
+
         ResourceStates initialState = ResourceStates::Common;
 
         // see TextureDesc::keepInitialState
@@ -749,6 +788,7 @@ namespace nvrhi
         constexpr BufferDesc& setIsShaderBindingTable(bool value) { isShaderBindingTable = value; return *this; }
         constexpr BufferDesc& setIsVolatile(bool value) { isVolatile = value; return *this; }
         constexpr BufferDesc& setIsVirtual(bool value) { isVirtual = value; return *this; }
+        constexpr BufferDesc& setIsTiled(bool value) { isTiled = value; return *this; }
         constexpr BufferDesc& setInitialState(ResourceStates value) { initialState = value; return *this; }
         constexpr BufferDesc& setKeepInitialState(bool value) { keepInitialState = value; return *this; }
         constexpr BufferDesc& setCpuAccess(CpuAccessMode value) { cpuAccess = value; return *this; }
@@ -3849,6 +3889,14 @@ namespace nvrhi
 
         virtual void getTextureTiling(ITexture* texture, uint32_t* numTiles, PackedMipDesc* desc, TileShape* tileShape, uint32_t* subresourceTilingsNum, SubresourceTiling* subresourceTilings) = 0;
         virtual void updateTextureTileMappings(ITexture* texture, const TextureTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue = CommandQueue::Graphics) = 0;
+
+        // Commit or decommit byte ranges of a tiled buffer (BufferDesc::isTiled).
+        // This is a QUEUE operation, not a command-list one: it takes effect in
+        // queue order on `executionQueue`, so the caller is responsible for
+        // ordering it against work that reads the affected ranges. On Vulkan
+        // that means a timeline semaphore — see the Signal overload in
+        // nvrhi/vulkan.h — never submission order alone.
+        virtual void updateBufferTileMappings(IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings, CommandQueue executionQueue = CommandQueue::Graphics) = 0;
 
         virtual SamplerFeedbackTextureHandle createSamplerFeedbackTexture(ITexture* pairedTexture, const SamplerFeedbackTextureDesc& desc) = 0;
         virtual SamplerFeedbackTextureHandle createSamplerFeedbackForNativeTexture(ObjectType objectType, Object texture, ITexture* pairedTexture) = 0;

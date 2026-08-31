@@ -117,6 +117,17 @@ namespace nvrhi::vulkan
             .setUsage(usageFlags)
             .setSharingMode(vk::SharingMode::eExclusive);
 
+        // A tiled buffer reserves its virtual range now and is backed in
+        // blocks later by updateBufferTileMappings. Residency lets it be
+        // backed PARTIALLY, which is the whole point: the committed prefix
+        // grows and shrinks while the buffer — and its device address —
+        // stay put.
+        if (desc.isTiled)
+        {
+            bufferInfo.setFlags(vk::BufferCreateFlagBits::eSparseBinding
+                | vk::BufferCreateFlagBits::eSparseResidency);
+        }
+
         // Promote to Concurrent if requested AND the device has more than
         // one queue family. See TextureDesc::sharedAcrossQueues docs.
         if (desc.sharedAcrossQueues && !m_ConcurrentQueueFamilyIndices.empty())
@@ -144,7 +155,21 @@ namespace nvrhi::vulkan
 
         m_Context.nameVKObject(VkBuffer(buffer->buffer), vk::ObjectType::eBuffer, vk::DebugReportObjectTypeEXT::eBuffer, desc.debugName.c_str());
 
-        if (!desc.isVirtual)
+        // A tiled buffer owns no memory of its own — the caller commits blocks
+        // into it from heaps — but it still needs its device address, which a
+        // sparse buffer has from creation and keeps for its whole lifetime,
+        // backed or not. That stability is what lets BDA consumers hold a
+        // pointer across a (de)commit.
+        if (desc.isTiled)
+        {
+            if (m_Context.extensions.buffer_device_address
+                && (usageFlags & vk::BufferUsageFlagBits::eShaderDeviceAddress) != vk::BufferUsageFlags(0))
+            {
+                auto addressInfo = vk::BufferDeviceAddressInfo().setBuffer(buffer->buffer);
+                buffer->deviceAddress = m_Context.device.getBufferAddress(addressInfo);
+            }
+        }
+        else if (!desc.isVirtual)
         {
             res = m_Allocator.allocateBufferMemory(buffer, (usageFlags & vk::BufferUsageFlagBits::eShaderDeviceAddress) != vk::BufferUsageFlags(0));
             CHECK_VK_FAIL(res)

@@ -255,6 +255,18 @@ namespace nvrhi::vulkan
             CommandQueue executionQueue,
             VkSemaphore signalSemaphore, uint64_t signalValue) = 0;
 
+        // Buffer equivalent of updateTextureTileMappingsSignal. The signal is
+        // how a (de)commit is ordered against the work that reads the range:
+        // vkQueueBindSparse is a queue operation and does NOT order against
+        // submits by submission order, so a caller that decommits without
+        // waiting on this semaphore can pull memory out from under in-flight
+        // work. Pass VK_NULL_HANDLE to skip signaling (equivalent to
+        // updateBufferTileMappings).
+        virtual void updateBufferTileMappingsSignal(
+            IBuffer* buffer, const BufferTilesMapping* tileMappings, uint32_t numTileMappings,
+            CommandQueue executionQueue,
+            VkSemaphore signalSemaphore, uint64_t signalValue) = 0;
+
         // Submit ppCmd with the per-submit wait/signal extras attached to
         // THIS submit only, BYPASSING the queue accumulator. See SubmitSyncExtras
         // doc above. Submission errors retain the legacy fatal/exception behavior.
