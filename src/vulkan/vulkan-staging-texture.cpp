@@ -42,7 +42,13 @@ namespace nvrhi::vulkan
         uint32_t blockY = y / formatInfo.blockSize;
         uint32_t blockZ = z;
 
-        return footprint.offset + (blockX + (blockY + blockZ * footprint.numRows) * footprint.rowPitch);
+        // rowPitch is in bytes, so the column term must be too: blockX is a
+        // block count and scales by the block's byte size. Without that scale
+        // a slice at x > 0 addressed the buffer at x bytes instead of
+        // x * bytesPerBlock, so only x == 0 slices copied the right pixels.
+        return footprint.offset
+            + size_t(blockX) * formatInfo.bytesPerBlock
+            + (size_t(blockY) + size_t(blockZ) * footprint.numRows) * footprint.rowPitch;
     }
 
     size_t StagingTexture::computeCopyableFootprints()
@@ -246,7 +252,8 @@ namespace nvrhi::vulkan
         if (!srcFootprint)
             return;
 
-        size_t srcBufferOffset = computePlacedBufferOffset(*srcFootprint, srcSlice.x, srcSlice.y, srcSlice.z);
+        size_t srcBufferOffset = computePlacedBufferOffset(*srcFootprint,
+            resolvedSrcSlice.x, resolvedSrcSlice.y, resolvedSrcSlice.z);
         assert((srcBufferOffset & 0x3) == 0);  // per vulkan spec
 
         TextureSubresourceSet dstSubresource = TextureSubresourceSet(
