@@ -347,6 +347,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatchMesh(uint32_t groupsX, uint32_t groupsY, uint32_t groupsZ)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateMeshletVolatileBuffers();
@@ -356,6 +357,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatchMeshIndirect(uint32_t offsetBytes, uint32_t maxDrawCount)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateMeshletVolatileBuffers();
@@ -372,6 +374,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatchMeshIndirectCount(uint32_t paramOffsetBytes, uint32_t countOffsetBytes, uint32_t maxDrawCount)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateMeshletVolatileBuffers();

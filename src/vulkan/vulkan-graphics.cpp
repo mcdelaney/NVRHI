@@ -708,6 +708,7 @@ namespace nvrhi::vulkan
 
     void CommandList::draw(const DrawArguments& args)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateGraphicsVolatileBuffers();
@@ -720,6 +721,7 @@ namespace nvrhi::vulkan
 
     void CommandList::drawIndexed(const DrawArguments& args)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateGraphicsVolatileBuffers();
@@ -733,6 +735,7 @@ namespace nvrhi::vulkan
 
     void CommandList::drawIndirect(uint32_t offsetBytes, uint32_t drawCount)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateGraphicsVolatileBuffers();
@@ -745,6 +748,7 @@ namespace nvrhi::vulkan
 
     void CommandList::drawIndexedIndirect(uint32_t offsetBytes, uint32_t drawCount)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateGraphicsVolatileBuffers();
@@ -757,6 +761,7 @@ namespace nvrhi::vulkan
 
     void CommandList::drawIndexedIndirectCount(uint32_t paramOffsetBytes, uint32_t countOffsetBytes, uint32_t maxDrawCount)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateGraphicsVolatileBuffers();

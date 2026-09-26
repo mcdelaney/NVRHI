@@ -25,7 +25,6 @@
 
 namespace nvrhi::vulkan
 {
-
     CommandList::CommandList(Device* device, const VulkanContext& context, const CommandListParameters& parameters)
         : m_Device(device)
         , m_Context(context)
@@ -54,6 +53,10 @@ namespace nvrhi::vulkan
         switch (objectType)
         {
         case ObjectTypes::VK_CommandBuffer:
+            // f111-pig: the caller records native commands whose accesses the
+            // tracker cannot see; the access dump shows them as one command
+            // (IDevice::getMarkerCommandBuffer is the hand-out for markers).
+            m_StateTracker.endCommand("native");
             return Object(m_CurrentCmdBuf->cmdBuf);
         default:
             return nullptr;
@@ -74,6 +77,7 @@ namespace nvrhi::vulkan
         // f111-pig: a leaked pushComputeOnlyBarrierScope must not poison the
         // next recording with narrowed barriers.
         m_ComputeOnlyBarrierScopeDepth = 0;
+        installAccessDumpHooks();
 
         m_CurrentCmdBuf = m_Device->getQueue(m_CommandListParameters.queueType)->getOrCreateCommandBuffer();
 
@@ -100,6 +104,9 @@ namespace nvrhi::vulkan
         m_StateTracker.keepBufferInitialStates();
         m_StateTracker.keepTextureInitialStates();
         commitBarriers();
+        // f111-pig: the keepInitialState restores are close()'s own accesses
+        // in the access dump, not the next recording's.
+        m_StateTracker.endCommand("close");
 
 #ifdef NVRHI_WITH_RTXMU
         // Any RTXMU BLAS writes not already consumed by a TLAS still need to
@@ -200,6 +207,7 @@ namespace nvrhi::vulkan
  
     void CommandList::convertCoopVecMatrices(coopvec::ConvertMatrixLayoutDesc const* convertDescs, size_t numDescs)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         if (!m_Context.extensions.NV_cooperative_vector)
             return;
 

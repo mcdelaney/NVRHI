@@ -51,6 +51,65 @@ namespace nvrhi::vulkan
             return remaining;
         }
 
+        // f111-pig: the PIG_BARRIER_STATS=2 dump window also prints one
+        // "[ACCESS] <command> <resource:state>..." line per recorded command
+        // (CommandListResourceStateTracker::setAccessHooks), interleaved with
+        // the commit dumps, for offline dependency-depth analysis.
+        // Explicit setBufferState/setTextureState requirements print with an
+        // upper-case tag ('B'/'T'): they declare a state for later work
+        // rather than being the next command's own binding.
+        struct PendingAccess
+        {
+            const char* name;
+            const void* resource;
+            bool isTexture;
+            bool isExplicit;
+            ResourceStates state;
+        };
+        inline std::vector<PendingAccess>& threadPendingAccesses()
+        {
+            thread_local std::vector<PendingAccess> pending;
+            return pending;
+        }
+        inline bool& threadExplicitRequirement()
+        {
+            thread_local bool isExplicit = false;
+            return isExplicit;
+        }
+        void dumpAccess(const char* name, const void* resource, bool isTexture, ResourceStates state)
+        {
+            if (threadBarrierDumpRemaining() > 0)
+                threadPendingAccesses().push_back(
+                    { name, resource, isTexture, threadExplicitRequirement(), state });
+        }
+        void dumpCommand(const char* kind)
+        {
+            std::vector<PendingAccess>& pending = threadPendingAccesses();
+            if (threadBarrierDumpRemaining() > 0)
+            {
+                fprintf(stderr, "[ACCESS] %s", kind);
+                for (const PendingAccess& a : pending)
+                    fprintf(stderr, " %c'%s'@%p:%x",
+                        a.isTexture ? (a.isExplicit ? 'T' : 't') : (a.isExplicit ? 'B' : 'b'),
+                        a.name, a.resource, unsigned(a.state));
+                fprintf(stderr, "\n");
+            }
+            pending.clear();
+        }
+    }
+
+    void CommandList::installAccessDumpHooks()
+    {
+        detail::threadPendingAccesses().clear();
+        if (detail::threadBarrierDumpRemaining() > 0)
+            m_StateTracker.setAccessHooks(&detail::dumpAccess, &detail::dumpCommand);
+        else
+            m_StateTracker.setAccessHooks(nullptr, nullptr);
+    }
+
+    namespace detail
+    {
+
         // A queue family with neither graphics nor compute capability (the
         // application's transfer+sparse DMA queue) cannot name shader stages
         // or shader access in barrier scopes: the VUID-*-07454 family rejects
@@ -2417,6 +2476,13 @@ namespace nvrhi::vulkan
             vulkanBuffer, dependency);
     }
 
+    VkCommandBuffer Device::getMarkerCommandBuffer(ICommandList* commandList)
+    {
+        return commandList
+            ? checked_cast<CommandList*>(commandList)->getMarkerCommandBuffer()
+            : VK_NULL_HANDLE;
+    }
+
     bool Device::ensureTextureStateTracked(
         ICommandList* commandList,
         ITexture* texture,
@@ -2604,7 +2670,9 @@ namespace nvrhi::vulkan
     {
         Texture* texture = checked_cast<Texture*>(_texture);
 
+        detail::threadExplicitRequirement() = true;
         requireTextureState(texture, subresources, stateBits, shaderStages);
+        detail::threadExplicitRequirement() = false;
 
         if (m_CurrentCmdBuf)
             m_CurrentCmdBuf->referencedResources.push_back(texture);
@@ -2622,8 +2690,10 @@ namespace nvrhi::vulkan
     {
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
+        detail::threadExplicitRequirement() = true;
         requireBufferState(buffer, stateBits, shaderStages);
-        
+        detail::threadExplicitRequirement() = false;
+
         if (m_CurrentCmdBuf)
             m_CurrentCmdBuf->referencedResources.push_back(buffer);
     }

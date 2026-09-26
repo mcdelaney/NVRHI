@@ -625,6 +625,7 @@ namespace nvrhi::vulkan
 
     void CommandList::buildOpacityMicromap(rt::IOpacityMicromap* pOpacityMicromap, const rt::OpacityMicromapDesc& desc)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         OpacityMicromap* omm = checked_cast<OpacityMicromap*>(pOpacityMicromap);
 
         if (m_EnableAutomaticBarriers)
@@ -687,6 +688,7 @@ namespace nvrhi::vulkan
 
     void CommandList::buildBottomLevelAccelStruct(rt::IAccelStruct* _as, const rt::GeometryDesc* pGeometries, size_t numGeometries, rt::AccelStructBuildFlags buildFlags)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         AccelStruct* as = checked_cast<AccelStruct*>(_as);
 
         const bool performUpdate = (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != 0;
@@ -878,6 +880,7 @@ namespace nvrhi::vulkan
 
     void CommandList::compactBottomLevelAccelStructs()
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
 #ifdef NVRHI_WITH_RTXMU
 
         if (!m_Context.rtxMuResources->asBuildsCompleted.empty())
@@ -1013,6 +1016,7 @@ namespace nvrhi::vulkan
 
     void CommandList::buildTopLevelAccelStruct(rt::IAccelStruct* _as, const rt::InstanceDesc* pInstances, size_t numInstances, rt::AccelStructBuildFlags buildFlags)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         AccelStruct* as = checked_cast<AccelStruct*>(_as);
 
         as->instances.resize(numInstances);
@@ -1096,6 +1100,7 @@ namespace nvrhi::vulkan
 
     void CommandList::buildTopLevelAccelStructFromBuffer(rt::IAccelStruct* _as, nvrhi::IBuffer* _instanceBuffer, uint64_t instanceBufferOffset, size_t numInstances, rt::AccelStructBuildFlags buildFlags)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         AccelStruct* as = checked_cast<AccelStruct*>(_as);
         Buffer* instanceBuffer = checked_cast<Buffer*>(_instanceBuffer);
 
@@ -1140,6 +1145,7 @@ namespace nvrhi::vulkan
 
     void CommandList::executeMultiIndirectClusterOperation(const rt::cluster::OperationDesc& desc)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         // Create Vulkan operation info
         vk::ClusterAccelerationStructureInputInfoNV inputInfo = {};
         vk::ClusterAccelerationStructureMoveObjectsInputNV moveInput = {};
@@ -1560,6 +1566,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatchRays(const rt::DispatchRaysArguments& args)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateRayTracingVolatileBuffers();

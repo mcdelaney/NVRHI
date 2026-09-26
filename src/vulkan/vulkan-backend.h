@@ -1453,6 +1453,7 @@ namespace nvrhi::vulkan
         bool addBufferMemoryDependency(
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) override;
+        VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) override;
         bool ensureTextureStateTracked(
             ICommandList* commandList, ITexture* texture,
             TextureSubresourceSet subresources,
@@ -1564,6 +1565,14 @@ namespace nvrhi::vulkan
         void open() override;
         void close() override;
         void clearState() override;
+        // f111-pig: installs the tracker's access hooks when this thread's
+        // PIG_BARRIER_STATS=2 dump window is armed (vulkan-state-tracking.cpp).
+        void installAccessDumpHooks();
+        // f111-pig: see IDevice::getMarkerCommandBuffer.
+        VkCommandBuffer getMarkerCommandBuffer() const
+        {
+            return m_CurrentCmdBuf ? VkCommandBuffer(m_CurrentCmdBuf->cmdBuf) : VK_NULL_HANDLE;
+        }
 
         void clearTextureFloat(ITexture* texture, TextureSubresourceSet subresources, const Color& clearColor) override;
         void clearDepthStencilTexture(ITexture* texture, TextureSubresourceSet subresources, bool clearDepth, float depth, bool clearStencil, uint8_t stencil) override;

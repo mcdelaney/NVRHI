@@ -142,8 +142,31 @@ namespace nvrhi
         [[nodiscard]] const std::vector<BufferBarrier>& getBufferBarriers() const { return m_BufferBarriers; }
         void clearBarriers() { m_TextureBarriers.clear(); m_BufferBarriers.clear(); }
 
+        // f111-pig: access observation for offline dependency analysis. The
+        // access hook sees every tracked state requirement (bindings and
+        // explicit setXState alike); the command hook fires at the end of
+        // every recording method (RecordedCommandScope), so the requirements
+        // since the previous command are the accesses of this one. Null
+        // unless the backend installs them (the Vulkan PIG_BARRIER_STATS=2
+        // dump window), so the cost outside it is one branch per requirement.
+        using AccessHook = void (*)(const char* name, const void* resource,
+            bool isTexture, ResourceStates state);
+        using CommandHook = void (*)(const char* kind);
+        void setAccessHooks(AccessHook access, CommandHook command)
+        {
+            m_AccessHook = access;
+            m_CommandHook = command;
+        }
+        void endCommand(const char* kind)
+        {
+            if (m_CommandHook)
+                m_CommandHook(kind);
+        }
+
     private:
         IMessageCallback* m_MessageCallback;
+        AccessHook m_AccessHook = nullptr;
+        CommandHook m_CommandHook = nullptr;
 
         std::unordered_map<TextureStateExtension*, std::unique_ptr<TextureState>> m_TextureStates;
         std::unordered_map<BufferStateExtension*, std::unique_ptr<BufferState>> m_BufferStates;
@@ -158,6 +181,25 @@ namespace nvrhi
 
         TextureState* getTextureStateTracking(TextureStateExtension* texture, bool allowCreate);
         BufferState* getBufferStateTracking(BufferStateExtension* buffer, bool allowCreate);
+    };
+
+    // f111-pig: ends one recorded command for the access hooks when it leaves
+    // scope — at the END of a recording method, after the method's own state
+    // requirements. `kind` names the command (the method's __func__).
+    class RecordedCommandScope
+    {
+    public:
+        RecordedCommandScope(CommandListResourceStateTracker& tracker, const char* kind)
+            : m_Tracker(tracker)
+            , m_Kind(kind)
+        { }
+        ~RecordedCommandScope() { m_Tracker.endCommand(m_Kind); }
+        RecordedCommandScope(const RecordedCommandScope&) = delete;
+        RecordedCommandScope& operator=(const RecordedCommandScope&) = delete;
+
+    private:
+        CommandListResourceStateTracker& m_Tracker;
+        const char* m_Kind;
     };
 
     bool verifyPermanentResourceState(ResourceStates permanentState, ResourceStates requiredState, bool isTexture, const std::string& debugName, IMessageCallback* messageCallback);

@@ -333,6 +333,16 @@ namespace nvrhi::vulkan
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) = 0;
 
+        // f111-pig: the open command list's VkCommandBuffer for commands that
+        // access no memory (diagnostic checkpoints, debug labels). Unlike
+        // getNativeObject(VK_CommandBuffer) it is not a recorded command: a
+        // native hand-out means accesses the state tracker cannot see (the
+        // PIG_BARRIER_STATS=2 access dump shows each one as a "native"
+        // command), and a marker has none. Recording anything that reads or
+        // writes memory through it hides that access from the tracker.
+        // VK_NULL_HANDLE when the list is not open.
+        virtual VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) = 0;
+
         // Fail-closed graph tracker initialization. If every addressed
         // subresource is unknown, these methods initialize it to exactState.
         // If every addressed subresource is already tracked in the exact same

@@ -440,6 +440,7 @@ namespace nvrhi::vulkan
     void CommandList::copyTexture(ITexture* _dst, const TextureSlice& dstSlice,
                                   ITexture* _src, const TextureSlice& srcSlice)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         Texture* dst = checked_cast<Texture*>(_dst);
         Texture* src = checked_cast<Texture*>(_src);
 
@@ -521,6 +522,7 @@ namespace nvrhi::vulkan
 
     void CommandList::writeTexture(ITexture* _dest, uint32_t arraySlice, uint32_t mipLevel, const void* data, size_t rowPitch, size_t depthPitch)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         endRenderPass();
 
         Texture* dest = checked_cast<Texture*>(_dest);
@@ -588,6 +590,7 @@ namespace nvrhi::vulkan
 
     void CommandList::resolveTexture(ITexture* _dest, const TextureSubresourceSet& dstSubresources, ITexture* _src, const TextureSubresourceSet& srcSubresources)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         endRenderPass();
 
         Texture* dest = checked_cast<Texture*>(_dest);
@@ -633,6 +636,7 @@ namespace nvrhi::vulkan
 
     void CommandList::clearTexture(ITexture* _texture, TextureSubresourceSet subresources, const vk::ClearColorValue& clearValue)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         endRenderPass();
 
         Texture* texture = checked_cast<Texture*>(_texture);
@@ -671,6 +675,7 @@ namespace nvrhi::vulkan
 
     void CommandList::clearDepthStencilTexture(ITexture* _texture, TextureSubresourceSet subresources, bool clearDepth, float depth, bool clearStencil, uint8_t stencil)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         endRenderPass();
 
         if (!clearDepth && !clearStencil)

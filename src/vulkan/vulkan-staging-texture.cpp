@@ -181,6 +181,7 @@ namespace nvrhi::vulkan
 
     void CommandList::copyTexture(IStagingTexture* _dst, const TextureSlice& dstSlice, ITexture* _src, const TextureSlice& srcSlice)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         Texture* src = checked_cast<Texture*>(_src);
         StagingTexture* dst = checked_cast<StagingTexture*>(_dst);
 
@@ -239,6 +240,7 @@ namespace nvrhi::vulkan
 
     void CommandList::copyTexture(ITexture* _dst, const TextureSlice& dstSlice, IStagingTexture* _src, const TextureSlice& srcSlice)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         StagingTexture* src = checked_cast<StagingTexture*>(_src);
         Texture* dst = checked_cast<Texture*>(_dst);
 

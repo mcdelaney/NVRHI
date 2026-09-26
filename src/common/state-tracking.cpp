@@ -376,6 +376,9 @@ namespace nvrhi
             return;
         }
 
+        if (m_AccessHook)
+            m_AccessHook(texture->descRef.debugName.c_str(), texture, true, state);
+
         subresources = subresources.resolve(texture->descRef, false);
 
         TextureState* tracking = getTextureStateTracking(texture, true);
@@ -595,6 +598,9 @@ namespace nvrhi
             // CPU-visible buffers can't change state
             return;
         }
+
+        if (m_AccessHook)
+            m_AccessHook(buffer->descRef.debugName.c_str(), buffer, false, state);
 
         BufferState* tracking = getBufferStateTracking(buffer, true);
 

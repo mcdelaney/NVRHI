@@ -265,6 +265,7 @@ namespace nvrhi::vulkan
                                              IBuffer* _src, uint64_t srcOffsetBytes,
                                              uint64_t dataSizeBytes)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         Buffer* dest = checked_cast<Buffer*>(_dest);
         Buffer* src = checked_cast<Buffer*>(_src);
 
@@ -482,6 +483,7 @@ namespace nvrhi::vulkan
 
     void CommandList::writeBuffer(IBuffer* _buffer, const void *data, size_t dataSize, uint64_t destOffsetBytes)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         Buffer* buffer = checked_cast<Buffer*>(_buffer);
 
         assert(destOffsetBytes <= buffer->desc.byteSize);
@@ -547,6 +549,7 @@ namespace nvrhi::vulkan
 
     void CommandList::clearBufferUInt(IBuffer* b, uint32_t clearValue)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         Buffer* buffer = checked_cast<Buffer*>(b);
 
         assert(m_CurrentCmdBuf);

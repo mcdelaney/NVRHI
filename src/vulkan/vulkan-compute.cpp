@@ -165,6 +165,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatch(uint32_t groupsX, uint32_t groupsY, uint32_t groupsZ)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateComputeVolatileBuffers();
@@ -174,6 +175,7 @@ namespace nvrhi::vulkan
 
     void CommandList::dispatchIndirect(uint32_t offsetBytes)
     {
+        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
         assert(m_CurrentCmdBuf);
 
         updateComputeVolatileBuffers();
