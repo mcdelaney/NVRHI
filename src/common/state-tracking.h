@@ -142,31 +142,36 @@ namespace nvrhi
         [[nodiscard]] const std::vector<BufferBarrier>& getBufferBarriers() const { return m_BufferBarriers; }
         void clearBarriers() { m_TextureBarriers.clear(); m_BufferBarriers.clear(); }
 
-        // f111-pig: access observation for offline dependency analysis. The
-        // access hook sees every tracked state requirement (bindings and
-        // explicit setXState alike); the command hook fires at the end of
-        // every recording method (RecordedCommandScope), so the requirements
-        // since the previous command are the accesses of this one. Null
-        // unless the backend installs them (the Vulkan PIG_BARRIER_STATS=2
-        // dump window), so the cost outside it is one branch per requirement.
-        using AccessHook = void (*)(const char* name, const void* resource,
-            bool isTexture, ResourceStates state);
-        using CommandHook = void (*)(const char* kind);
-        void setAccessHooks(AccessHook access, CommandHook command)
+        // f111-pig: access observation (the Vulkan PIG_BARRIER_STATS=2 access
+        // dump, IDevice::setCommandListObserver). The access hook sees every
+        // tracked state requirement (bindings and explicit setXState alike)
+        // with the resource's state-extension pointer and whether the
+        // requirement changes the tracked state of any subresource it names;
+        // the command hook fires at the end of every recording method
+        // (RecordedCommandScope), so the requirements since the previous
+        // command are the accesses of this one. Null unless the backend
+        // installs them, so the cost otherwise is one branch per requirement.
+        using AccessHook = void (*)(void* context, const char* name,
+            const void* resource, bool isTexture, ResourceStates state,
+            bool transitions);
+        using CommandHook = void (*)(void* context, const char* kind);
+        void setAccessHooks(AccessHook access, CommandHook command, void* context)
         {
             m_AccessHook = access;
             m_CommandHook = command;
+            m_HookContext = context;
         }
         void endCommand(const char* kind)
         {
             if (m_CommandHook)
-                m_CommandHook(kind);
+                m_CommandHook(m_HookContext, kind);
         }
 
     private:
         IMessageCallback* m_MessageCallback;
         AccessHook m_AccessHook = nullptr;
         CommandHook m_CommandHook = nullptr;
+        void* m_HookContext = nullptr;
 
         std::unordered_map<TextureStateExtension*, std::unique_ptr<TextureState>> m_TextureStates;
         std::unordered_map<BufferStateExtension*, std::unique_ptr<BufferState>> m_BufferStates;

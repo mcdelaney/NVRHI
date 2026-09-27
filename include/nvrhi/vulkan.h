@@ -107,6 +107,16 @@ namespace nvrhi::vulkan
         MemoryDependencyDesc& setShaderStagesAfter(ShaderType value) { shaderStagesAfter = value; return *this; }
     };
 
+    // f111-pig: IDevice::setCommandListObserver's callbacks. resource is the
+    // IBuffer or ITexture the requirement names (isTexture says which).
+    struct CommandListObserver
+    {
+        void* context = nullptr;
+        void (*onRequire)(void* context, IResource* resource, bool isTexture,
+            ResourceStates state, bool isExplicit, bool transitions) = nullptr;
+        void (*onCommand)(void* context, const char* kind) = nullptr;
+    };
+
     // Exact graph-owned state used to initialize an open command list's local
     // tracker. Shader-visible states require a non-None shader-stage mask;
     // ShaderType::All is accepted here as the exact logical union of every
@@ -342,6 +352,23 @@ namespace nvrhi::vulkan
         // writes memory through it hides that access from the tracker.
         // VK_NULL_HANDLE when the list is not open.
         virtual VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) = 0;
+
+        // f111-pig: attaches an observer to a command list's state tracking,
+        // for a frame graph's declaration validator; nullptr detaches. It
+        // stays attached across recordings until detached. onRequire sees
+        // every tracked state requirement the list records — bindings and
+        // explicit setBufferState / setTextureState (isExplicit) alike —
+        // with the resource it names and whether it changes the resource's
+        // tracked state (transitions); onCommand fires at the end of every
+        // recorded command (its NVRHI method name), after that command's
+        // requirements. Attaching marks the list's binding states dirty, so
+        // its next state set re-requires every bound resource and indirect
+        // or index buffer even when they match the state already set.
+        // Permanent-state and CPU-visible resources are not
+        // tracked and not reported. The callbacks run on the recording
+        // thread inside NVRHI calls and must not record into the list.
+        virtual void setCommandListObserver(ICommandList* commandList,
+            const CommandListObserver* observer) = 0;
 
         // Fail-closed graph tracker initialization. If every addressed
         // subresource is unknown, these methods initialize it to exactState.

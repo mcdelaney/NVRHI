@@ -376,12 +376,48 @@ namespace nvrhi
             return;
         }
 
-        if (m_AccessHook)
-            m_AccessHook(texture->descRef.debugName.c_str(), texture, true, state);
-
         subresources = subresources.resolve(texture->descRef, false);
 
         TextureState* tracking = getTextureStateTracking(texture, true);
+
+        if (m_AccessHook)
+        {
+            // Whether this requirement changes any named subresource's
+            // tracked state, by the comparison the barrier logic below makes.
+            bool transitions = false;
+            if (tracking->subresourceStates.empty())
+            {
+                const ResourceStates effectiveState = preserveReadOnlyDepthState
+                    ? preserveShaderDepthReadState(tracking->state, state)
+                    : state;
+                transitions = tracking->state != effectiveState;
+            }
+            else
+            {
+                for (ArraySlice arraySlice = subresources.baseArraySlice;
+                    !transitions && arraySlice < subresources.baseArraySlice + subresources.numArraySlices;
+                    arraySlice++)
+                {
+                    for (MipLevel mipLevel = subresources.baseMipLevel;
+                        mipLevel < subresources.baseMipLevel + subresources.numMipLevels;
+                        mipLevel++)
+                    {
+                        const ResourceStates priorState = tracking->subresourceStates[
+                            calcSubresource(mipLevel, arraySlice, texture->descRef)];
+                        const ResourceStates effectiveState = preserveReadOnlyDepthState
+                            ? preserveShaderDepthReadState(priorState, state)
+                            : state;
+                        if (priorState != effectiveState)
+                        {
+                            transitions = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            m_AccessHook(m_HookContext, texture->descRef.debugName.c_str(), texture,
+                true, state, transitions);
+        }
 
         if (tracking->subresourceStates.empty() && tracking->state == ResourceStates::Unknown)
         {
@@ -599,10 +635,11 @@ namespace nvrhi
             return;
         }
 
-        if (m_AccessHook)
-            m_AccessHook(buffer->descRef.debugName.c_str(), buffer, false, state);
-
         BufferState* tracking = getBufferStateTracking(buffer, true);
+
+        if (m_AccessHook)
+            m_AccessHook(m_HookContext, buffer->descRef.debugName.c_str(), buffer,
+                false, state, tracking->state != state);
 
         if (tracking->state == ResourceStates::Unknown)
         {

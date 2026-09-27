@@ -76,13 +76,30 @@ namespace nvrhi::vulkan
             thread_local bool isExplicit = false;
             return isExplicit;
         }
-        void dumpAccess(const char* name, const void* resource, bool isTexture, ResourceStates state)
+        // The tracker's hooks for one command list (context): the dump while
+        // this thread's window is armed, and the list's observer.
+        void onTrackedAccess(void* context, const char* name, const void* resource,
+            bool isTexture, ResourceStates state, bool transitions)
         {
+            const bool isExplicit = threadExplicitRequirement();
             if (threadBarrierDumpRemaining() > 0)
-                threadPendingAccesses().push_back(
-                    { name, resource, isTexture, threadExplicitRequirement(), state });
+                threadPendingAccesses().push_back({ name, resource, isTexture, isExplicit, state });
+            const CommandListObserver& observer =
+                static_cast<CommandList*>(context)->getObserver();
+            if (observer.onRequire)
+            {
+                // The tracker holds the state-extension base; Texture and
+                // Buffer derive from it, so the public object is exact.
+                IResource* publicResource = isTexture
+                    ? static_cast<IResource*>(static_cast<Texture*>(
+                        static_cast<TextureStateExtension*>(const_cast<void*>(resource))))
+                    : static_cast<IResource*>(static_cast<Buffer*>(
+                        static_cast<BufferStateExtension*>(const_cast<void*>(resource))));
+                observer.onRequire(observer.context, publicResource, isTexture, state,
+                    isExplicit, transitions);
+            }
         }
-        void dumpCommand(const char* kind)
+        void onTrackedCommand(void* context, const char* kind)
         {
             std::vector<PendingAccess>& pending = threadPendingAccesses();
             if (threadBarrierDumpRemaining() > 0)
@@ -95,16 +112,31 @@ namespace nvrhi::vulkan
                 fprintf(stderr, "\n");
             }
             pending.clear();
+            const CommandListObserver& observer =
+                static_cast<CommandList*>(context)->getObserver();
+            if (observer.onCommand)
+                observer.onCommand(observer.context, kind);
         }
     }
 
-    void CommandList::installAccessDumpHooks()
+    void CommandList::updateAccessHooks()
     {
         detail::threadPendingAccesses().clear();
-        if (detail::threadBarrierDumpRemaining() > 0)
-            m_StateTracker.setAccessHooks(&detail::dumpAccess, &detail::dumpCommand);
+        if (detail::threadBarrierDumpRemaining() > 0 || m_Observer.onRequire || m_Observer.onCommand)
+            m_StateTracker.setAccessHooks(&detail::onTrackedAccess, &detail::onTrackedCommand, this);
         else
-            m_StateTracker.setAccessHooks(nullptr, nullptr);
+            m_StateTracker.setAccessHooks(nullptr, nullptr, nullptr);
+    }
+
+    void CommandList::setObserver(const CommandListObserver* observer)
+    {
+        m_Observer = observer ? *observer : CommandListObserver {};
+        // The next state set re-requires every bound resource, so the
+        // observer sees the whole span's accesses, not only the bindings
+        // that differ from the state already set.
+        if (observer)
+            m_BindingStatesDirty = true;
+        updateAccessHooks();
     }
 
     namespace detail
@@ -2481,6 +2513,13 @@ namespace nvrhi::vulkan
         return commandList
             ? checked_cast<CommandList*>(commandList)->getMarkerCommandBuffer()
             : VK_NULL_HANDLE;
+    }
+
+    void Device::setCommandListObserver(ICommandList* commandList,
+        const CommandListObserver* observer)
+    {
+        if (commandList)
+            checked_cast<CommandList*>(commandList)->setObserver(observer);
     }
 
     bool Device::ensureTextureStateTracked(

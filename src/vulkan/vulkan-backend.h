@@ -1454,6 +1454,8 @@ namespace nvrhi::vulkan
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) override;
         VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) override;
+        void setCommandListObserver(ICommandList* commandList,
+            const CommandListObserver* observer) override;
         bool ensureTextureStateTracked(
             ICommandList* commandList, ITexture* texture,
             TextureSubresourceSet subresources,
@@ -1565,9 +1567,13 @@ namespace nvrhi::vulkan
         void open() override;
         void close() override;
         void clearState() override;
-        // f111-pig: installs the tracker's access hooks when this thread's
-        // PIG_BARRIER_STATS=2 dump window is armed (vulkan-state-tracking.cpp).
-        void installAccessDumpHooks();
+        // f111-pig: installs the tracker's access hooks while this thread's
+        // PIG_BARRIER_STATS=2 dump window is armed or an observer is attached
+        // (vulkan-state-tracking.cpp); called at open() and by setObserver.
+        void updateAccessHooks();
+        // f111-pig: IDevice::setCommandListObserver.
+        void setObserver(const CommandListObserver* observer);
+        const CommandListObserver& getObserver() const { return m_Observer; }
         // f111-pig: see IDevice::getMarkerCommandBuffer.
         VkCommandBuffer getMarkerCommandBuffer() const
         {
@@ -1689,6 +1695,9 @@ namespace nvrhi::vulkan
         // f111-pig: non-zero while inside pushComputeOnlyBarrierScope regions;
         // reset at open() so a leaked scope cannot poison the next recording.
         uint32_t m_ComputeOnlyBarrierScopeDepth = 0;
+        // f111-pig: IDevice::setCommandListObserver's observer (none when its
+        // callbacks are null).
+        CommandListObserver m_Observer {};
 
         // current internal command buffer
         TrackedCommandBufferPtr m_CurrentCmdBuf = nullptr;

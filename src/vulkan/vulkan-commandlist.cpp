@@ -77,7 +77,7 @@ namespace nvrhi::vulkan
         // f111-pig: a leaked pushComputeOnlyBarrierScope must not poison the
         // next recording with narrowed barriers.
         m_ComputeOnlyBarrierScopeDepth = 0;
-        installAccessDumpHooks();
+        updateAccessHooks();
 
         m_CurrentCmdBuf = m_Device->getQueue(m_CommandListParameters.queueType)->getOrCreateCommandBuffer();
 
