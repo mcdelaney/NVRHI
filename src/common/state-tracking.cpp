@@ -712,12 +712,17 @@ namespace nvrhi
             }
         }
 
-        if (uavNecessary && !transitionNecessary
+        // f111-pig: a transition into UnorderedAccess orders every earlier
+        // access before the first UAV access, so it is the buffer's first UAV
+        // barrier: with automatic UAV barriers disabled, the binds after it
+        // emit none (a frame graph level's one batch covers them).
+        if ((uavNecessary || (transitionNecessary
+                && (state & ResourceStates::UnorderedAccess) != 0))
             && !coalescedPendingUavBarrier)
         {
             tracking->firstUavBarrierPlaced = true;
         }
-    
+
         tracking->shaderStages = advanceOutstandingShaderStages(
             tracking->shaderStages,
             effectiveShaderStages,
