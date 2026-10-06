@@ -56,6 +56,8 @@ namespace nvrhi::vulkan
         , m_Allocator(m_Context)
         , m_TimerQueryAllocator(desc.maxTimerQueries, true)
     {
+        m_Context.pipelineCompileOffload = &m_PipelineCompileOffload;
+
         // NVRHI exposes logical Graphics/Compute/Copy queues, but applications
         // are allowed to bind more than one of those labels to the same Vulkan
         // queue. There must be exactly one Queue wrapper per physical queue:

@@ -469,6 +469,38 @@ namespace nvrhi::vulkan
         // block lists, so treat this as a diagnostic call rather than a
         // per-frame one.
         virtual InternalMemoryStats getInternalMemoryStats() = 0;
+
+        // Compute-pipeline compile offload. Between begin and end,
+        // createComputePipeline returns once the pipeline layout exists and
+        // hands the vkCreateComputePipelines call to `submit` instead of making
+        // it. The first consumer of the VkPipeline — a command list's
+        // setComputeState, getNativeObject, or the destructor — compiles it on
+        // its own thread when no submitted job has started it yet, and waits
+        // for the job that has otherwise, so a compile never queues behind work
+        // its consumer could have run ahead of: with no free executor thread
+        // the cost is exactly the synchronous one.
+        //
+        //   submit(user, job, jobContext): called on the creating thread, once
+        //     per pipeline; must run job(jobContext) exactly once, on any
+        //     thread, before endPipelineCompileOffload returns or later.
+        //   compileScope(user, shaderName): optional; called on whichever
+        //     thread compiles, immediately before vkCreateComputePipelines
+        //     with the shader's debug name and immediately after with null —
+        //     for a crash handler that names the pipelines in flight.
+        //
+        // endPipelineCompileOffload stops offloading and returns once every
+        // offloaded compile has finished. It returns false when any of them
+        // produced no VkPipeline: those were handed out as live pipeline
+        // objects with nothing to bind, so the caller must treat it as fatal.
+        // Each failure is reported through the message callback.
+        struct PipelineCompileOffloadDesc
+        {
+            void (*submit)(void* user, void (*job)(void* jobContext), void* jobContext) = nullptr;
+            void (*compileScope)(void* user, const char* shaderName) = nullptr;
+            void* user = nullptr;
+        };
+        virtual void beginPipelineCompileOffload(const PipelineCompileOffloadDesc& desc) = 0;
+        virtual bool endPipelineCompileOffload() = 0;
     };
 
     typedef RefCountPtr<IDevice> DeviceHandle;

@@ -28,6 +28,7 @@
 #include "../common/state-tracking.h"
 #include "../common/versioning.h"
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <list>
 #include <unordered_set>
@@ -167,6 +168,21 @@ namespace nvrhi::vulkan
     };
 #endif
 
+    // IDevice::beginPipelineCompileOffload's state, owned by the Device and
+    // reached by every pipeline through VulkanContext::pipelineCompileOffload.
+    struct PipelineCompileOffload
+    {
+        std::mutex mutex;
+        // Notified after every offloaded compile finishes.
+        std::condition_variable compiled;
+        // submit == null: creation compiles synchronously.
+        IDevice::PipelineCompileOffloadDesc desc;
+        // Submitted compiles not yet finished.
+        uint32_t outstanding = 0;
+        // Finished compiles that produced no VkPipeline since the last begin.
+        uint32_t failed = 0;
+    };
+
     // underlying vulkan context
     struct VulkanContext
     {
@@ -231,6 +247,7 @@ namespace nvrhi::vulkan
         std::unique_ptr<RtxMuResources> rtxMuResources;
 #endif
         vk::DescriptorSetLayout emptyDescriptorSetLayout;
+        PipelineCompileOffload* pipelineCompileOffload = nullptr;
 
         void nameVKObject(const void* handle, const vk::ObjectType objtype,
             const vk::DebugReportObjectTypeEXT objtypeEXT, const char* name) const;
@@ -1053,8 +1070,27 @@ namespace nvrhi::vulkan
         BindingVector<RefCountPtr<BindingLayout>> pipelineBindingLayouts;
         BindingVector<uint32_t> descriptorSetIdxToBindingIdx;
         vk::PipelineLayout pipelineLayout;
+        // Final once compileState reads Compiled (see ensureCompiled).
         vk::Pipeline pipeline;
         vk::ShaderStageFlags pushConstantVisibility;
+
+        // An offloaded compile (IDevice::beginPipelineCompileOffload) is Queued
+        // until one thread claims it — the submitted job or the first consumer
+        // — and Compiling while that thread runs vkCreateComputePipelines.
+        enum CompileState : uint8_t { Compiled, Queued, Compiling };
+        std::atomic<uint8_t> compileState { Compiled };
+
+        // What an offloaded compile reads; the compile releases it.
+        struct DeferredCompile
+        {
+            std::vector<vk::SpecializationInfo> specInfos;
+            std::vector<vk::SpecializationMapEntry> specMapEntries;
+            std::vector<uint32_t> specData;
+            vk::ComputePipelineCreateInfo pipelineInfo;
+            void (*compileScope)(void* user, const char* shaderName) = nullptr;
+            void* scopeUser = nullptr;
+        };
+        std::unique_ptr<DeferredCompile> deferred;
 
         explicit ComputePipeline(const VulkanContext& context)
             : m_Context(context)
@@ -1064,7 +1100,23 @@ namespace nvrhi::vulkan
         const ComputePipelineDesc& getDesc() const override { return desc; }
         Object getNativeObject(ObjectType objectType) override;
 
+        // Returns with `pipeline` final: compiles it on this thread while it is
+        // still queued, otherwise waits for the thread compiling it.
+        void ensureCompiled()
+        {
+            if (compileState.load(std::memory_order_acquire) != Compiled)
+                claimOrWait();
+        }
+
+        // The submitted job: compiles unless a consumer claimed it first, then
+        // drops the reference createComputePipeline took for the job.
+        static void runSubmittedCompile(void* jobContext);
+
     private:
+        bool tryClaim();
+        void claimOrWait();
+        void compile();
+
         const VulkanContext& m_Context;
     };
 
@@ -1349,6 +1401,9 @@ namespace nvrhi::vulkan
 
         InternalMemoryStats getInternalMemoryStats() override;
 
+        void beginPipelineCompileOffload(const PipelineCompileOffloadDesc& desc) override;
+        bool endPipelineCompileOffload() override;
+
         // Called by UploadManager as it mints and releases chunks. `bytes` and
         // `chunks` are signed deltas.
         void accountChunkPool(bool isScratch, int64_t bytes, int32_t chunks);
@@ -1488,6 +1543,7 @@ namespace nvrhi::vulkan
         // Concurrent sharing still requires at least two distinct queue
         // families in m_ConcurrentQueueFamilyIndices.
         const bool m_AccelStructStorageSharedAcrossQueues;
+        PipelineCompileOffload m_PipelineCompileOffload;
         VulkanContext m_Context;
         VulkanAllocator m_Allocator;
         

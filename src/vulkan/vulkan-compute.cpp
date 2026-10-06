@@ -56,23 +56,45 @@ namespace nvrhi::vulkan
 
         assert(numShaders == 1);
 
-        std::vector<vk::SpecializationInfo> specInfos;
-        std::vector<vk::SpecializationMapEntry> specMapEntries;
-        std::vector<uint32_t> specData;
+        // The create info lives on the heap: an offloaded compile reads it
+        // after this function returns, and the stage info points into the
+        // specialization vectors, whose storage a move of the struct keeps.
+        auto deferred = std::make_unique<ComputePipeline::DeferredCompile>();
 
-        specInfos.reserve(numShadersWithSpecializations);
-        specMapEntries.reserve(numSpecializationConstants);
-        specData.reserve(numSpecializationConstants);
+        deferred->specInfos.reserve(numShadersWithSpecializations);
+        deferred->specMapEntries.reserve(numSpecializationConstants);
+        deferred->specData.reserve(numSpecializationConstants);
 
-        auto shaderStageInfo = makeShaderStageCreateInfo(CS, 
-            specInfos, specMapEntries, specData);
-        
-        auto pipelineInfo = vk::ComputePipelineCreateInfo()
+        auto shaderStageInfo = makeShaderStageCreateInfo(CS,
+            deferred->specInfos, deferred->specMapEntries, deferred->specData);
+
+        deferred->pipelineInfo = vk::ComputePipelineCreateInfo()
                                 .setStage(shaderStageInfo)
                                 .setLayout(pso->pipelineLayout);
 
+        PipelineCompileOffloadDesc offload;
+        {
+            std::lock_guard<std::mutex> lock(m_PipelineCompileOffload.mutex);
+            offload = m_PipelineCompileOffload.desc;
+            if (offload.submit)
+                ++m_PipelineCompileOffload.outstanding;
+        }
+        if (offload.submit)
+        {
+            deferred->compileScope = offload.compileScope;
+            deferred->scopeUser = offload.user;
+            pso->deferred = std::move(deferred);
+            pso->compileState.store(ComputePipeline::Queued, std::memory_order_relaxed);
+            // The job's reference: the pipeline outlives a job that has not run
+            // even when every handle to it is dropped first.
+            pso->AddRef();
+            ComputePipelineHandle handle = ComputePipelineHandle::Create(pso);
+            offload.submit(offload.user, &ComputePipeline::runSubmittedCompile, pso);
+            return handle;
+        }
+
         res = m_Context.device.createComputePipelines(m_Context.pipelineCache,
-                                                    1, &pipelineInfo,
+                                                    1, &deferred->pipelineInfo,
                                                     m_Context.allocationCallbacks,
                                                     &pso->pipeline);
 
@@ -81,8 +103,90 @@ namespace nvrhi::vulkan
         return ComputePipelineHandle::Create(pso);
     }
 
+    void Device::beginPipelineCompileOffload(const PipelineCompileOffloadDesc& desc)
+    {
+        std::lock_guard<std::mutex> lock(m_PipelineCompileOffload.mutex);
+        assert(!m_PipelineCompileOffload.desc.submit && desc.submit);
+        m_PipelineCompileOffload.desc = desc;
+        m_PipelineCompileOffload.failed = 0;
+    }
+
+    bool Device::endPipelineCompileOffload()
+    {
+        std::unique_lock<std::mutex> lock(m_PipelineCompileOffload.mutex);
+        m_PipelineCompileOffload.desc = PipelineCompileOffloadDesc();
+        m_PipelineCompileOffload.compiled.wait(lock,
+            [this] { return m_PipelineCompileOffload.outstanding == 0; });
+        const bool allCompiled = m_PipelineCompileOffload.failed == 0;
+        m_PipelineCompileOffload.failed = 0;
+        return allCompiled;
+    }
+
+    void ComputePipeline::runSubmittedCompile(void* jobContext)
+    {
+        ComputePipeline* pso = static_cast<ComputePipeline*>(jobContext);
+        if (pso->tryClaim())
+            pso->compile();
+        pso->Release();
+    }
+
+    bool ComputePipeline::tryClaim()
+    {
+        uint8_t expected = Queued;
+        return compileState.compare_exchange_strong(expected, Compiling, std::memory_order_acquire);
+    }
+
+    void ComputePipeline::claimOrWait()
+    {
+        if (tryClaim())
+        {
+            compile();
+            return;
+        }
+        PipelineCompileOffload& offload = *m_Context.pipelineCompileOffload;
+        std::unique_lock<std::mutex> lock(offload.mutex);
+        offload.compiled.wait(lock,
+            [this] { return compileState.load(std::memory_order_acquire) == Compiled; });
+    }
+
+    void ComputePipeline::compile()
+    {
+        const char* shaderName = desc.CS->getDesc().debugName.c_str();
+        if (deferred->compileScope)
+            deferred->compileScope(deferred->scopeUser, shaderName);
+        const vk::Result res = m_Context.device.createComputePipelines(m_Context.pipelineCache,
+                                                    1, &deferred->pipelineInfo,
+                                                    m_Context.allocationCallbacks,
+                                                    &pipeline);
+        if (deferred->compileScope)
+            deferred->compileScope(deferred->scopeUser, nullptr);
+        deferred.reset();
+
+        const bool compiled = res == vk::Result::eSuccess;
+        if (!compiled)
+        {
+            pipeline = nullptr;
+            m_Context.error(std::string("Offloaded compute pipeline compile failed for shader '")
+                + shaderName + "': " + resultToString(VkResult(res)));
+        }
+
+        PipelineCompileOffload& offload = *m_Context.pipelineCompileOffload;
+        {
+            std::lock_guard<std::mutex> lock(offload.mutex);
+            compileState.store(Compiled, std::memory_order_release);
+            --offload.outstanding;
+            if (!compiled)
+                ++offload.failed;
+        }
+        offload.compiled.notify_all();
+    }
+
     ComputePipeline::~ComputePipeline()
     {
+        // A queued compile holds a reference, so the last release happens
+        // after whichever thread compiled it has finished.
+        assert(compileState.load(std::memory_order_acquire) == Compiled);
+
         if (pipeline)
         {
             m_Context.device.destroyPipeline(pipeline, m_Context.allocationCallbacks);
@@ -103,6 +207,7 @@ namespace nvrhi::vulkan
         case ObjectTypes::VK_PipelineLayout:
             return Object(pipelineLayout);
         case ObjectTypes::VK_Pipeline:
+            ensureCompiled();
             return Object(pipeline);
         default:
             return nullptr;
@@ -124,6 +229,7 @@ namespace nvrhi::vulkan
 
         if (m_CurrentComputeState.pipeline != state.pipeline)
         {
+            pso->ensureCompiled();
             m_CurrentCmdBuf->cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, pso->pipeline);
 
             m_CurrentCmdBuf->referencedResources.push_back(state.pipeline);
