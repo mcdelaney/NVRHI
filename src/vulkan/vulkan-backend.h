@@ -1754,6 +1754,12 @@ namespace nvrhi::vulkan
         // f111-pig: IDevice::setCommandListObserver's observer (none when its
         // callbacks are null).
         CommandListObserver m_Observer {};
+        // f111-pig: commitBarriersInternal's translated barriers, cleared per
+        // commit with their capacity kept, so a warm list's barrier commits
+        // never touch the heap (they were locals: an allocation and a free on
+        // every commit that emitted a barrier).
+        std::vector<vk::ImageMemoryBarrier2> m_ImageBarrierScratch;
+        std::vector<vk::BufferMemoryBarrier2> m_BufferBarrierScratch;
 
         // current internal command buffer
         TrackedCommandBufferPtr m_CurrentCmdBuf = nullptr;

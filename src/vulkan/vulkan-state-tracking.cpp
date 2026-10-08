@@ -981,8 +981,10 @@ namespace nvrhi::vulkan
 
     void CommandList::commitBarriersInternal()
     {
-        std::vector<vk::ImageMemoryBarrier2> imageBarriers;
-        std::vector<vk::BufferMemoryBarrier2> bufferBarriers;
+        std::vector<vk::ImageMemoryBarrier2>& imageBarriers = m_ImageBarrierScratch;
+        std::vector<vk::BufferMemoryBarrier2>& bufferBarriers = m_BufferBarrierScratch;
+        imageBarriers.clear();
+        bufferBarriers.clear();
 
         // Opt-in (CommandListParameters::collapseComputeOnlyBarrierStages): on a
         // command list whose accesses are all from compute shaders, collapse the
