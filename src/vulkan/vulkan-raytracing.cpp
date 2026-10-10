@@ -330,7 +330,10 @@ namespace nvrhi::vulkan
         as->allowUpdate = (desc.buildFlags & rt::AccelStructBuildFlags::AllowUpdate) != 0;
 
 #ifdef NVRHI_WITH_RTXMU
-        bool isManaged = desc.isTopLevel;
+        // A virtual BLAS is the caller's to place (bindAccelStructMemory), so
+        // it takes NVRHI's own storage and build path rather than RTXMU's
+        // suballocation: its memory comes from wherever the caller binds it.
+        bool isManaged = desc.isTopLevel || desc.isVirtual;
 #else
         bool isManaged = true;
 #endif
@@ -377,6 +380,7 @@ namespace nvrhi::vulkan
 
             auto buildSizes = m_Context.device.getAccelerationStructureBuildSizesKHR(
                 vk::AccelerationStructureBuildTypeKHR::eDevice, buildInfo, maxPrimitiveCounts);
+            as->buildScratchSize = buildSizes.buildScratchSize;
 
             BufferDesc bufferDesc;
             bufferDesc.byteSize = buildSizes.accelerationStructureSize;
@@ -688,13 +692,25 @@ namespace nvrhi::vulkan
 
     void CommandList::buildBottomLevelAccelStruct(rt::IAccelStruct* _as, const rt::GeometryDesc* pGeometries, size_t numGeometries, rt::AccelStructBuildFlags buildFlags)
     {
-        RecordedCommandScope recordedCommand(m_StateTracker, __func__);
+        buildBottomLevelAccelStructInternal(_as, pGeometries, numGeometries, buildFlags, nullptr, 0);
+    }
+
+    bool CommandList::buildBottomLevelAccelStructInternal(rt::IAccelStruct* _as, const rt::GeometryDesc* pGeometries, size_t numGeometries,
+        rt::AccelStructBuildFlags buildFlags, Buffer* explicitScratch, uint64_t explicitScratchOffset)
+    {
+        RecordedCommandScope recordedCommand(m_StateTracker, "buildBottomLevelAccelStruct");
         AccelStruct* as = checked_cast<AccelStruct*>(_as);
 
         const bool performUpdate = (buildFlags & rt::AccelStructBuildFlags::PerformUpdate) != 0;
         if (performUpdate)
         {
             assert(as->allowUpdate);
+        }
+        // The caller's scratch takes a build over the structure's own storage.
+        if (explicitScratch && (!as->dataBuffer || performUpdate))
+        {
+            m_Context.error("A BLAS build with the caller's scratch needs a structure over its own storage and no update");
+            return false;
         }
 
         std::vector<vk::AccelerationStructureGeometryKHR> geometries;
@@ -772,52 +788,61 @@ namespace nvrhi::vulkan
 
         if (performUpdate)
             buildInfo.setSrcAccelerationStructure(as->accelStruct);
-        
+
 #ifdef NVRHI_WITH_RTXMU
-        commitBarriers();
-
-        std::array<vk::AccelerationStructureBuildGeometryInfoKHR, 1> buildInfos = { buildInfo };
-        std::array<const vk::AccelerationStructureBuildRangeInfoKHR*, 1> buildRangeArrays = { buildRanges.data() };
-        std::array<const uint32_t*, 1> maxPrimArrays = { maxPrimitiveCounts.data() };
-
-        if(as->rtxmuId == ~0ull)
+        // RTXMU builds the BLASes it allocates (no dataBuffer). A virtual BLAS
+        // the caller placed has its own storage and builds below, with the
+        // command list's scratch, exactly as without RTXMU.
+        if (!as->dataBuffer)
         {
-            std::vector<uint64_t> accelStructsToBuild;
-            m_Context.rtxMemUtil->PopulateBuildCommandList(m_CurrentCmdBuf->cmdBuf,
-                                                           buildInfos.data(),
-                                                           buildRangeArrays.data(),
-                                                           maxPrimArrays.data(),
-                                                           (uint32_t)buildInfos.size(),
-                                                           accelStructsToBuild);
+            commitBarriers();
+
+            std::array<vk::AccelerationStructureBuildGeometryInfoKHR, 1> buildInfos = { buildInfo };
+            std::array<const vk::AccelerationStructureBuildRangeInfoKHR*, 1> buildRangeArrays = { buildRanges.data() };
+            std::array<const uint32_t*, 1> maxPrimArrays = { maxPrimitiveCounts.data() };
+
+            if(as->rtxmuId == ~0ull)
+            {
+                std::vector<uint64_t> accelStructsToBuild;
+                m_Context.rtxMemUtil->PopulateBuildCommandList(m_CurrentCmdBuf->cmdBuf,
+                                                               buildInfos.data(),
+                                                               buildRangeArrays.data(),
+                                                               maxPrimArrays.data(),
+                                                               (uint32_t)buildInfos.size(),
+                                                               accelStructsToBuild);
 
 
-            as->rtxmuId = accelStructsToBuild[0];
-            
-            as->rtxmuBuffer = m_Context.rtxMemUtil->GetBuffer(as->rtxmuId);
-            as->accelStruct = m_Context.rtxMemUtil->GetAccelerationStruct(as->rtxmuId);
-            as->accelStructDeviceAddress = m_Context.rtxMemUtil->GetDeviceAddress(as->rtxmuId);
+                as->rtxmuId = accelStructsToBuild[0];
 
-            m_CurrentCmdBuf->rtxmuBuildIds.push_back(as->rtxmuId);
-            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
+                as->rtxmuBuffer = m_Context.rtxMemUtil->GetBuffer(as->rtxmuId);
+                as->accelStruct = m_Context.rtxMemUtil->GetAccelerationStruct(as->rtxmuId);
+                as->accelStructDeviceAddress = m_Context.rtxMemUtil->GetDeviceAddress(as->rtxmuId);
+
+                m_CurrentCmdBuf->rtxmuBuildIds.push_back(as->rtxmuId);
+                m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
+            }
+            else
+            {
+                std::vector<uint64_t> buildsToUpdate(1, as->rtxmuId);
+
+                m_Context.rtxMemUtil->PopulateUpdateCommandList(m_CurrentCmdBuf->cmdBuf,
+                                                                buildInfos.data(),
+                                                                buildRangeArrays.data(),
+                                                                maxPrimArrays.data(),
+                                                                (uint32_t)buildInfos.size(),
+                                                                buildsToUpdate);
+
+                // Keep refits in the same dependency set as initial RTXMU builds.
+                // A GPU-buffer TLAS build cannot enumerate its child BLASes, so it
+                // consumes this list to emit AS_WRITE -> AS_READ barriers before
+                // reading the updated child bounds.
+                m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
+            }
+            if (as->desc.trackLiveness)
+                m_CurrentCmdBuf->referencedResources.push_back(as);
+            return true;
         }
-        else
-        {
-            std::vector<uint64_t> buildsToUpdate(1, as->rtxmuId);
-
-            m_Context.rtxMemUtil->PopulateUpdateCommandList(m_CurrentCmdBuf->cmdBuf,
-                                                            buildInfos.data(),
-                                                            buildRangeArrays.data(),
-                                                            maxPrimArrays.data(),
-                                                            (uint32_t)buildInfos.size(),
-                                                            buildsToUpdate);
-
-            // Keep refits in the same dependency set as initial RTXMU builds.
-            // A GPU-buffer TLAS build cannot enumerate its child BLASes, so it
-            // consumes this list to emit AS_WRITE -> AS_READ barriers before
-            // reading the updated child bounds.
-            m_CurrentCmdBuf->rtxmuPendingUavBarrierIds.push_back(as->rtxmuId);
-        }
-#else
+#endif
 
         if (m_EnableAutomaticBarriers)
         {
@@ -843,7 +868,7 @@ namespace nvrhi::vulkan
                 << as->dataBuffer->getDesc().byteSize << " bytes";
 
             m_Context.error(ss.str());
-            return;
+            return false;
         }
 
         size_t scratchSize = performUpdate
@@ -853,19 +878,38 @@ namespace nvrhi::vulkan
         Buffer* scratchBuffer = nullptr;
         uint64_t scratchOffset = 0;
 
-        bool allocated = m_ScratchManager->suballocateBuffer(scratchSize, &scratchBuffer, &scratchOffset, nullptr,
-            currentVersion, m_Context.accelStructProperties.minAccelerationStructureScratchOffsetAlignment);
-
-        if (!allocated)
+        if (explicitScratch)
         {
-            std::stringstream ss;
-            ss << "Couldn't suballocate a scratch buffer for BLAS " << utils::DebugNameToString(as->desc.debugName) << " build. "
-                "The build requires " << scratchSize << " bytes of scratch space.";
-
-            m_Context.error(ss.str());
-            return;
+            const uint64_t alignment = m_Context.accelStructProperties.minAccelerationStructureScratchOffsetAlignment;
+            if (!explicitScratch->deviceAddress || (alignment && explicitScratchOffset % alignment != 0)
+                || explicitScratchOffset + scratchSize > explicitScratch->getDesc().byteSize)
+            {
+                std::stringstream ss;
+                ss << "BLAS " << utils::DebugNameToString(as->desc.debugName) << " build requires " << scratchSize
+                    << " bytes of scratch at an offset aligned to " << alignment << ", which the caller's buffer does not give";
+                m_Context.error(ss.str());
+                return false;
+            }
+            scratchBuffer = explicitScratch;
+            scratchOffset = explicitScratchOffset;
+            m_CurrentCmdBuf->referencedResources.push_back(explicitScratch);
         }
-        
+        else
+        {
+            bool allocated = m_ScratchManager->suballocateBuffer(scratchSize, &scratchBuffer, &scratchOffset, nullptr,
+                currentVersion, m_Context.accelStructProperties.minAccelerationStructureScratchOffsetAlignment);
+
+            if (!allocated)
+            {
+                std::stringstream ss;
+                ss << "Couldn't suballocate a scratch buffer for BLAS " << utils::DebugNameToString(as->desc.debugName) << " build. "
+                    "The build requires " << scratchSize << " bytes of scratch space.";
+
+                m_Context.error(ss.str());
+                return false;
+            }
+        }
+
         assert(scratchBuffer->deviceAddress);
         buildInfo.setScratchData(scratchBuffer->deviceAddress + scratchOffset);
 
@@ -873,9 +917,35 @@ namespace nvrhi::vulkan
         std::array<const vk::AccelerationStructureBuildRangeInfoKHR*, 1> buildRangeArrays = { buildRanges.data() };
 
         m_CurrentCmdBuf->cmdBuf.buildAccelerationStructuresKHR(buildInfos, buildRangeArrays);
-#endif
         if (as->desc.trackLiveness)
             m_CurrentCmdBuf->referencedResources.push_back(as);
+        return true;
+    }
+
+    bool Device::buildBottomLevelAccelStructWithScratch(ICommandList* commandList, rt::IAccelStruct* as,
+        const rt::GeometryDesc* pGeometries, size_t numGeometries, rt::AccelStructBuildFlags buildFlags,
+        IBuffer* scratchBuffer, uint64_t scratchOffset)
+    {
+        CommandList* vulkanCommandList = dynamic_cast<CommandList*>(commandList);
+        Buffer* vulkanScratch = dynamic_cast<Buffer*>(scratchBuffer);
+        if (!vulkanCommandList || !vulkanScratch || !as)
+        {
+            m_Context.error("A BLAS build with the caller's scratch requires Vulkan command-list, structure and buffer objects");
+            return false;
+        }
+        return vulkanCommandList->buildBottomLevelAccelStructInternal(as, pGeometries, numGeometries, buildFlags,
+            vulkanScratch, scratchOffset);
+    }
+
+    uint64_t Device::getAccelStructBuildScratchSize(rt::IAccelStruct* _as)
+    {
+        AccelStruct* as = checked_cast<AccelStruct*>(_as);
+        return as && as->dataBuffer ? as->buildScratchSize : 0;
+    }
+
+    uint64_t Device::getAccelStructScratchAlignment()
+    {
+        return m_Context.accelStructProperties.minAccelerationStructureScratchOffsetAlignment;
     }
 
     void CommandList::compactBottomLevelAccelStructs()
@@ -1030,18 +1100,21 @@ namespace nvrhi::vulkan
             {
                 AccelStruct* blas = checked_cast<AccelStruct*>(src.bottomLevelAS);
 #ifdef NVRHI_WITH_RTXMU
-                blas->rtxmuBuffer = m_Context.rtxMemUtil->GetBuffer(blas->rtxmuId);
-                blas->accelStruct = m_Context.rtxMemUtil->GetAccelerationStruct(blas->rtxmuId);
-                blas->accelStructDeviceAddress = m_Context.rtxMemUtil->GetDeviceAddress(blas->rtxmuId);
-                dst.setAccelerationStructureReference(blas->accelStructDeviceAddress);
-#else
+                // RTXMU may have moved its BLASes (compaction); a placed one
+                // has its own storage, tracked below.
+                if (!blas->dataBuffer)
+                {
+                    blas->rtxmuBuffer = m_Context.rtxMemUtil->GetBuffer(blas->rtxmuId);
+                    blas->accelStruct = m_Context.rtxMemUtil->GetAccelerationStruct(blas->rtxmuId);
+                    blas->accelStructDeviceAddress = m_Context.rtxMemUtil->GetDeviceAddress(blas->rtxmuId);
+                }
+#endif
                 dst.setAccelerationStructureReference(blas->accelStructDeviceAddress);
 
-                if (m_EnableAutomaticBarriers)
+                if (m_EnableAutomaticBarriers && blas->dataBuffer)
                 {
                     requireBufferState(blas->dataBuffer, nvrhi::ResourceStates::AccelStructBuildBlas);
                 }
-#endif
             }
             else // !src.bottomLevelAS
             {
@@ -1256,7 +1329,9 @@ namespace nvrhi::vulkan
     AccelStruct::~AccelStruct()
     {
 #ifdef NVRHI_WITH_RTXMU
-        bool isManaged = desc.isTopLevel;
+        // NVRHI owns the structure over its own storage: a TLAS, or a BLAS
+        // the caller placed (createAccelStruct's virtual path).
+        bool isManaged = desc.isTopLevel || dataBuffer != nullptr;
         if (!isManaged && rtxmuId != ~0ull)
         {
             std::lock_guard lockGuard(m_Context.rtxMuResources->asListMutex);
@@ -1321,9 +1396,13 @@ namespace nvrhi::vulkan
     uint64_t AccelStruct::getDeviceAddress() const
     {
 #ifdef NVRHI_WITH_RTXMU
-        if (!desc.isTopLevel)
+        if (!desc.isTopLevel && !dataBuffer)
             return m_Context.rtxMemUtil->GetDeviceAddress(rtxmuId);
 #endif
+        // A BLAS over its own storage has the address the driver reported
+        // (createAccelStruct, or bindAccelStructMemory for a placed one).
+        if (!desc.isTopLevel)
+            return accelStructDeviceAddress;
         return getBufferAddress(dataBuffer, 0).deviceAddress;
     }
 

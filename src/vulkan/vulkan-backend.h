@@ -1287,6 +1287,9 @@ namespace nvrhi::vulkan
         bool compacted = false;
         size_t rtxmuId = ~0ull;
         vk::Buffer rtxmuBuffer;
+        // f111-pig: the scratch a build takes, for a structure over its own
+        // storage (createAccelStruct's build sizes).
+        uint64_t buildScratchSize = 0;
 
 
         explicit AccelStruct(const VulkanContext& context)
@@ -1509,6 +1512,11 @@ namespace nvrhi::vulkan
             ICommandList* commandList, IBuffer* buffer,
             const MemoryDependencyDesc& dependency) override;
         VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) override;
+        bool buildBottomLevelAccelStructWithScratch(ICommandList* commandList,
+            rt::IAccelStruct* as, const rt::GeometryDesc* pGeometries, size_t numGeometries,
+            rt::AccelStructBuildFlags buildFlags, IBuffer* scratchBuffer, uint64_t scratchOffset) override;
+        uint64_t getAccelStructBuildScratchSize(rt::IAccelStruct* as) override;
+        uint64_t getAccelStructScratchAlignment() override;
         void setCommandListObserver(ICommandList* commandList,
             const CommandListObserver* observer) override;
         bool ensureTextureStateTracked(
@@ -1676,6 +1684,10 @@ namespace nvrhi::vulkan
         
         void buildOpacityMicromap(rt::IOpacityMicromap* omm, const rt::OpacityMicromapDesc& desc) override;
         void buildBottomLevelAccelStruct(rt::IAccelStruct* as, const rt::GeometryDesc* pGeometries, size_t numGeometries, rt::AccelStructBuildFlags buildFlags) override;
+        // f111-pig: a build with the caller's scratch (null: the scratch
+        // manager's). See Device::buildBottomLevelAccelStructWithScratch.
+        bool buildBottomLevelAccelStructInternal(rt::IAccelStruct* as, const rt::GeometryDesc* pGeometries, size_t numGeometries,
+            rt::AccelStructBuildFlags buildFlags, Buffer* explicitScratch, uint64_t explicitScratchOffset);
         void compactBottomLevelAccelStructs() override;
         void buildTopLevelAccelStruct(rt::IAccelStruct* as, const rt::InstanceDesc* pInstances, size_t numInstances, rt::AccelStructBuildFlags buildFlags) override;
         void buildTopLevelAccelStructFromBuffer(rt::IAccelStruct* as, nvrhi::IBuffer* instanceBuffer, uint64_t instanceBufferOffset, size_t numInstances,

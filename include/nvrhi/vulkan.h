@@ -353,6 +353,24 @@ namespace nvrhi::vulkan
         // VK_NULL_HANDLE when the list is not open.
         virtual VkCommandBuffer getMarkerCommandBuffer(ICommandList* commandList) = 0;
 
+        // f111-pig: builds a BLAS over its own storage (a virtual one the
+        // caller placed, bindAccelStructMemory) on `commandList` with the
+        // caller's scratch: `scratchBuffer` from `scratchOffset`, at least
+        // getAccelStructBuildScratchSize bytes, the offset a multiple of
+        // getAccelStructScratchAlignment. The list's scratch manager, whose
+        // chunks last as long as the list, is not used; the caller keeps the
+        // scratch until the list's submission completes and orders its
+        // reuse. The buffer needs UAVs and a device address. False (nothing
+        // recorded) for an RTXMU BLAS, an update, or scratch that is short.
+        virtual bool buildBottomLevelAccelStructWithScratch(ICommandList* commandList,
+            rt::IAccelStruct* as, const rt::GeometryDesc* pGeometries, size_t numGeometries,
+            rt::AccelStructBuildFlags buildFlags, IBuffer* scratchBuffer, uint64_t scratchOffset) = 0;
+        // f111-pig: the scratch a build of `as` takes (its geometries as
+        // created; 0 for an RTXMU BLAS), and the alignment a scratch offset
+        // needs.
+        virtual uint64_t getAccelStructBuildScratchSize(rt::IAccelStruct* as) = 0;
+        virtual uint64_t getAccelStructScratchAlignment() = 0;
+
         // f111-pig: attaches an observer to a command list's state tracking,
         // for a frame graph's declaration validator; nullptr detaches. It
         // stays attached across recordings until detached. onRequire sees
