@@ -3649,7 +3649,9 @@ namespace nvrhi
         // See the comments to rt::cluster::OperationDesc for more information.
         // - DX11: Not supported.
         // - DX12: Maps to NvAPI_D3D12_RaytracingExecuteMultiIndirectClusterOperation and requires NVAPI.
-        // - Vulkan: Not supported.
+        // - Vulkan: Maps to vkCmdBuildClusterAccelerationStructureIndirectNV and requires
+        //   VK_NV_cluster_acceleration_structure. Each strided array's stride is its buffer's
+        //   structStride and its size the buffer's byteSize past the offset.
         virtual void executeMultiIndirectClusterOperation(const rt::cluster::OperationDesc& desc) = 0;
 
         // Builds or updates a top-level ray tracing acceleration structure (TLAS) using instance data provided

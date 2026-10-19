@@ -1235,13 +1235,16 @@ namespace nvrhi::vulkan
         Buffer* outSizesBuffer = checked_cast<Buffer*>(desc.outSizesBuffer);
         Buffer* outAccelerationStructuresBuffer = checked_cast<Buffer*>(desc.outAccelerationStructuresBuffer);
 
-        // Set up resource states and barriers
+        // Set up resource states and barriers. The argument array and its count
+        // are indirect-command reads at the acceleration-structure build stage
+        // (VK_NV_cluster_acceleration_structure), which no shader-read state
+        // orders.
         if (m_EnableAutomaticBarriers)
         {
             if (indirectArgsBuffer)
-                requireBufferState(indirectArgsBuffer, ResourceStates::ShaderResource);
+                requireBufferState(indirectArgsBuffer, ResourceStates::AccelStructBuildInput);
             if (indirectArgCountBuffer)
-                requireBufferState(indirectArgCountBuffer, ResourceStates::ShaderResource);
+                requireBufferState(indirectArgCountBuffer, ResourceStates::AccelStructBuildInput);
             if (inOutAddressesBuffer)
                 requireBufferState(inOutAddressesBuffer, ResourceStates::UnorderedAccess);
             if (outSizesBuffer)

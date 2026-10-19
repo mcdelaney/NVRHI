@@ -342,10 +342,13 @@ namespace nvrhi::vulkan
         { ResourceStates::AccelStructBuildInput,
             vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR,
             // Vertex, index, transform, AABB and instance input buffers are
-            // shader reads performed by the acceleration-structure build.
+            // shader reads performed by the acceleration-structure build, and
+            // the arguments of an indirect build (the KHR indirect build's
+            // range infos, a cluster operation's argument array and count) are
+            // indirect-command reads at the same stage.
             // eAccelerationStructureReadKHR is for acceleration-structure
             // objects themselves (for example, BLAS inputs to a TLAS build).
-            vk::AccessFlagBits2::eShaderRead,
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eIndirectCommandRead,
             vk::ImageLayout::eUndefined },
         { ResourceStates::AccelStructBuildBlas,
             vk::PipelineStageFlagBits2::eAccelerationStructureBuildKHR,
