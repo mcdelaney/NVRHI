@@ -71,7 +71,9 @@ namespace nvrhi::vulkan
     class Framebuffer;
     class GraphicsPipeline;
     class ComputePipeline;
+    class BindingLayout;
     class BindingSet;
+    class DescriptorSetAllocator;
     class EventQuery;
     class TimerQuery;
     class Marker;
@@ -248,6 +250,7 @@ namespace nvrhi::vulkan
 #endif
         vk::DescriptorSetLayout emptyDescriptorSetLayout;
         PipelineCompileOffload* pipelineCompileOffload = nullptr;
+        DescriptorSetAllocator* descriptorSetAllocator = nullptr;
 
         void nameVKObject(const void* handle, const vk::ObjectType objtype,
             const vk::DebugReportObjectTypeEXT objtypeEXT, const char* name) const;
@@ -939,6 +942,138 @@ namespace nvrhi::vulkan
         const FramebufferInfoEx& getFramebufferInfo() const override { return framebufferInfo; }
     };
 
+    // f111-pig: one binding set's descriptor set and the shared pool it came from.
+    struct DescriptorSetAllocation
+    {
+        vk::DescriptorSet set;
+        // Index into DescriptorSetAllocator's pools, which are never removed.
+        uint32_t poolIndex = 0;
+    };
+
+    // f111-pig: binding sets take their descriptor sets from VkDescriptorPools
+    // that all binding sets share. Owned by the Device and reached by every
+    // binding set and layout through VulkanContext::descriptorSetAllocator.
+    // The measured driver costs behind the design and its sizes are in
+    // vulkan-resource-bindings.cpp.
+    //
+    // A destroyed binding set's descriptor set is kept on its layout and
+    // handed to the next binding set of that layout, so steady-state churn
+    // makes no pool allocation or free and grows no pool. Only a dying layout
+    // returns its kept sets to their pools. One mutex guards the pools and
+    // every layout's kept sets: binding sets are created on worker and render
+    // threads and destroyed on whichever thread retires the command lists
+    // that used them.
+    //
+    // Every descriptor a binding set does not write is written null, so a
+    // reused set never shows its previous owner's descriptors. That needs the
+    // nullDescriptor feature (VK_KHR_robustness2 or VK_EXT_robustness2), which
+    // createDevice requires (DeviceDesc::nullDescriptorSupported). Samplers
+    // have no null descriptor; an unwritten sampler gets a default sampler
+    // this allocator owns.
+    class DescriptorSetAllocator
+    {
+    public:
+        explicit DescriptorSetAllocator(const VulkanContext& context)
+            : m_Context(context)
+        { }
+        ~DescriptorSetAllocator();
+
+        // Creates the default sampler. A failure fails createDevice.
+        vk::Result init();
+        // Grows the null descriptor arrays to at least `count` of each kind,
+        // so one write covers a run of that many unwritten array elements.
+        // createBindingLayout calls it with the layout's longest binding.
+        void reserveNullDescriptors(uint32_t count);
+        // A descriptor set of the layout's descriptorSetLayout: one the layout
+        // kept, else a new one from the pools, opening a pool when none has
+        // room for it. False when the driver cannot provide one.
+        bool acquire(BindingLayout& layout, DescriptorSetAllocation& outAllocation);
+        // Appends null writes, one per run, for every descriptor of the layout
+        // that `writes` (all aimed at one set) leaves unwritten.
+        void appendNullWrites(const BindingLayout& layout, vk::DescriptorSet set,
+            std::vector<vk::WriteDescriptorSet>& writes) const;
+        // Keeps a destroyed binding set's descriptor set for the next binding
+        // set of the same layout. No GPU work may still reference it.
+        void recycle(BindingLayout& layout, const DescriptorSetAllocation& allocation);
+        // Frees the sets the layout kept into their pools; the layout is dying.
+        void releaseRecycled(BindingLayout& layout);
+
+        // Every descriptor type convertResourceType produces for a regular
+        // (non-bindless) layout.
+        static constexpr std::array<vk::DescriptorType, 9> c_PooledDescriptorTypes = {
+            vk::DescriptorType::eSampledImage,
+            vk::DescriptorType::eStorageImage,
+            vk::DescriptorType::eUniformTexelBuffer,
+            vk::DescriptorType::eStorageTexelBuffer,
+            vk::DescriptorType::eUniformBuffer,
+            vk::DescriptorType::eUniformBufferDynamic,
+            vk::DescriptorType::eStorageBuffer,
+            vk::DescriptorType::eSampler,
+            vk::DescriptorType::eAccelerationStructureKHR
+        };
+
+        // Descriptors of each c_PooledDescriptorTypes entry.
+        using PerType = std::array<uint32_t, c_PooledDescriptorTypes.size()>;
+        static PerType countPerType(const std::vector<vk::DescriptorPoolSize>& poolSizes);
+
+    private:
+        // Sets per pool; the measurement it comes from is in
+        // vulkan-resource-bindings.cpp.
+        static constexpr uint32_t c_SetsPerPool = 512;
+
+        struct Pool
+        {
+            vk::DescriptorPool pool;
+            // Descriptors of each c_PooledDescriptorTypes entry it was created
+            // with, and those held by its allocated sets.
+            PerType capacity {};
+            PerType used {};
+            // Sets allocated from it and not freed, recycled ones included.
+            uint32_t allocatedSets = 0;
+            // The fewest descriptors of a set the driver refused although the
+            // counters had room (fragmentation): sets at least that large skip
+            // the pool until a set is freed into it. UINT32_MAX: none refused.
+            uint32_t refusedSetDescriptors = UINT32_MAX;
+
+            // In m_PoolsWithRoom.
+            bool listed() const { return allocatedSets < c_SetsPerPool; }
+        };
+
+        // Null descriptors of each kind appendNullWrites points a run at.
+        struct NullDescriptorArrays
+        {
+            std::vector<vk::DescriptorImageInfo> images;
+            std::vector<vk::DescriptorImageInfo> samplers;
+            std::vector<vk::DescriptorBufferInfo> buffers;
+            std::vector<vk::BufferView> bufferViews;
+        };
+
+        // acquire under m_Mutex. A failure to report names itself in `failure`
+        // and `failureResult`; acquire reports it once the lock is released,
+        // because the message callback is the application's.
+        bool acquireLocked(BindingLayout& layout, DescriptorSetAllocation& outAllocation,
+            const char*& failure, vk::Result& failureResult);
+        // A new pool sized from the running averages, never too small for setCounts.
+        vk::Result openPool(const PerType& setCounts);
+
+        const VulkanContext& m_Context;
+        std::mutex m_Mutex;
+        std::vector<Pool> m_Pools;
+        // Pools with a free set slot; the last one is tried first.
+        std::vector<uint32_t> m_PoolsWithRoom;
+        // Descriptors of each c_PooledDescriptorTypes entry, and sets, ever
+        // allocated from the pools: a new pool's capacity follows the average.
+        std::array<uint64_t, c_PooledDescriptorTypes.size()> m_AllocatedDescriptors {};
+        uint64_t m_AllocatedSets = 0;
+        // The sampler written where a binding set leaves a sampler unwritten.
+        vk::Sampler m_NullSampler;
+        // Every generation lives until the allocator dies, because a write
+        // being built on another thread may point into an older one; the
+        // current one is published to appendNullWrites, which takes no lock.
+        std::vector<std::unique_ptr<NullDescriptorArrays>> m_NullDescriptorGenerations;
+        std::atomic<const NullDescriptorArrays*> m_NullDescriptors { nullptr };
+    };
+
     class BindingLayout : public RefCounter<IBindingLayout>
     {
     public:
@@ -952,6 +1087,27 @@ namespace nvrhi::vulkan
 
         // descriptor pool size information per binding set
         std::vector<vk::DescriptorPoolSize> descriptorPoolSizeInfo;
+
+        // f111-pig: descriptor sets of this layout's destroyed binding sets,
+        // handed to its next ones. Guarded by the DescriptorSetAllocator mutex.
+        std::vector<DescriptorSetAllocation> recycledDescriptorSets;
+        // f111-pig: the layout's descriptors numbered binding by binding, array
+        // element by array element: vulkanLayoutBindings[i]'s first one is
+        // bindingFirstDescriptor[i]. Regular layouts only.
+        std::vector<uint32_t> bindingFirstDescriptor;
+        uint32_t numDescriptors = 0;
+        // f111-pig: the same descriptors counted by type, for the pools.
+        DescriptorSetAllocator::PerType pooledDescriptorCounts {};
+        // f111-pig: every dynamic uniform buffer element, in the order
+        // vkCmdBindDescriptorSets takes their dynamic offsets: by binding
+        // number, then array element. createBindingLayout fails a layout with
+        // more than c_MaxVolatileConstantBuffersPerLayout.
+        struct DynamicBufferElement
+        {
+            uint32_t binding = 0;
+            uint32_t arrayElement = 0;
+        };
+        std::vector<DynamicBufferElement> dynamicBufferElements;
 
         BindingLayout(const VulkanContext& context, const BindingLayoutDesc& desc);
         BindingLayout(const VulkanContext& context, const BindlessLayoutDesc& desc);
@@ -974,11 +1130,16 @@ namespace nvrhi::vulkan
         BindingSetDesc desc;
         BindingLayoutHandle layout;
 
-        // TODO: move pool to the context instead
-        vk::DescriptorPool descriptorPool;
-        vk::DescriptorSet descriptorSet;
+        // f111-pig: from the shared pools (DescriptorSetAllocator), recycled to
+        // the layout when the binding set is destroyed.
+        DescriptorSetAllocation descriptorSetAllocation;
 
         std::vector<ResourceHandle> resources;
+        // f111-pig: one entry per layout dynamic uniform buffer element, in
+        // BindingLayout::dynamicBufferElements order; null where the binding set
+        // left it unset (written null, bound at dynamic offset 0). A layout
+        // holds at most c_MaxVolatileConstantBuffersPerLayout elements, array
+        // sizes counted (createBindingLayout).
         static_vector<Buffer*, c_MaxVolatileConstantBuffersPerLayout> volatileConstantBuffers;
 
         std::vector<uint16_t> bindingsThatNeedTransitions;
@@ -1337,6 +1498,8 @@ namespace nvrhi::vulkan
 
         Queue* getQueue(CommandQueue queue) const { return m_Queues[int(queue)].get(); }
         vk::QueryPool getTimerQueryPool() const { return m_TimerQueryPool; }
+        // f111-pig: createDevice's second step; a failure fails createDevice.
+        vk::Result initDescriptorSetAllocator() { return m_DescriptorSetAllocator.init(); }
 
         // IResource implementation
 
@@ -1554,7 +1717,11 @@ namespace nvrhi::vulkan
         PipelineCompileOffload m_PipelineCompileOffload;
         VulkanContext m_Context;
         VulkanAllocator m_Allocator;
-        
+        // Declared before m_Queues so it is destroyed after them: tearing down
+        // the queues releases in-flight command buffers, whose binding sets
+        // recycle into this.
+        DescriptorSetAllocator m_DescriptorSetAllocator;
+
         vk::QueryPool m_TimerQueryPool = nullptr;
         utils::BitSetAllocator m_TimerQueryAllocator;
 

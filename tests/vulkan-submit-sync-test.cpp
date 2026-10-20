@@ -630,26 +630,38 @@ int main()
     uint32_t distinctTransferQueueFamilyIndex = UINT32_MAX;
     bool supportsDescriptorUpdateAfterBindProbe = false;
     bool supportsMaintenance8 = false;
+    // NVRHI's createDevice requires nullDescriptor (DeviceDesc::nullDescriptorSupported).
+    const char* robustness2Extension = nullptr;
     for (VkPhysicalDevice candidate : physicalDevices)
     {
         const bool candidateHasMaintenance8 = hasDeviceExtension(
             candidate, VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+        const char* const candidateRobustness2 =
+            hasDeviceExtension(candidate, VK_KHR_ROBUSTNESS_2_EXTENSION_NAME) ? VK_KHR_ROBUSTNESS_2_EXTENSION_NAME
+            : hasDeviceExtension(candidate, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) ? VK_EXT_ROBUSTNESS_2_EXTENSION_NAME
+            : nullptr;
         VkPhysicalDeviceMaintenance8FeaturesKHR supportedMaintenance8 {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR
+        };
+        VkPhysicalDeviceRobustness2FeaturesKHR supportedRobustness2 {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR
         };
         VkPhysicalDeviceVulkan13Features supported13 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
         VkPhysicalDeviceVulkan12Features supported12 { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
         supported12.pNext = &supported13;
         supported13.pNext = candidateHasMaintenance8
             ? &supportedMaintenance8 : nullptr;
+        supportedRobustness2.pNext = &supported12;
         VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-        supported.pNext = &supported12;
+        supported.pNext = candidateRobustness2
+            ? static_cast<void*>(&supportedRobustness2) : static_cast<void*>(&supported12);
         vkGetPhysicalDeviceFeatures2(candidate, &supported);
 
         VkPhysicalDeviceProperties properties {};
         vkGetPhysicalDeviceProperties(candidate, &properties);
         if (properties.apiVersion < VK_API_VERSION_1_3
-            || !supported12.timelineSemaphore || !supported13.synchronization2)
+            || !supported12.timelineSemaphore || !supported13.synchronization2
+            || !candidateRobustness2 || !supportedRobustness2.nullDescriptor)
             continue;
 
         uint32_t queueFamilyCount = 0;
@@ -695,6 +707,7 @@ int main()
             && supported12.descriptorBindingUpdateUnusedWhilePending;
         supportsMaintenance8 = candidateHasMaintenance8
             && supportedMaintenance8.maintenance8;
+        robustness2Extension = candidateRobustness2;
         if (physicalDevice)
             break;
     }
@@ -733,16 +746,20 @@ int main()
         enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
         enabled12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     }
+    VkPhysicalDeviceRobustness2FeaturesKHR enabledRobustness2 {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR
+    };
+    enabledRobustness2.nullDescriptor = VK_TRUE;
+    enabledRobustness2.pNext = &enabled12;
     VkDeviceCreateInfo deviceInfo { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-    deviceInfo.pNext = &enabled12;
+    deviceInfo.pNext = &enabledRobustness2;
     deviceInfo.queueCreateInfoCount = queueInfoCount;
     deviceInfo.pQueueCreateInfos = queueInfos.data();
-    std::array<const char*, 1> deviceExtensions = {
-        VK_KHR_MAINTENANCE_8_EXTENSION_NAME
-    };
-    deviceInfo.enabledExtensionCount = supportsMaintenance8 ? 1u : 0u;
-    deviceInfo.ppEnabledExtensionNames = supportsMaintenance8
-        ? deviceExtensions.data() : nullptr;
+    std::vector<const char*> deviceExtensions = { robustness2Extension };
+    if (supportsMaintenance8)
+        deviceExtensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    deviceInfo.enabledExtensionCount = uint32_t(deviceExtensions.size());
+    deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
     VkDevice vkDevice = VK_NULL_HANDLE;
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &vkDevice) != VK_SUCCESS)
@@ -764,10 +781,10 @@ int main()
     nvrhiDesc.instance = instance;
     nvrhiDesc.physicalDevice = physicalDevice;
     nvrhiDesc.device = vkDevice;
-    nvrhiDesc.deviceExtensions = supportsMaintenance8
-        ? deviceExtensions.data() : nullptr;
-    nvrhiDesc.numDeviceExtensions = supportsMaintenance8 ? 1u : 0u;
+    nvrhiDesc.deviceExtensions = deviceExtensions.data();
+    nvrhiDesc.numDeviceExtensions = deviceExtensions.size();
     nvrhiDesc.maintenance8Supported = supportsMaintenance8;
+    nvrhiDesc.nullDescriptorSupported = true;
     nvrhiDesc.graphicsQueue = queue;
     nvrhiDesc.graphicsQueueIndex = int(queueFamilyIndex);
     // Bind all three logical queues to one physical VkQueue. Besides keeping
@@ -4070,8 +4087,9 @@ int main()
         ownershipDeviceDesc.transferQueueIndex =
             int(distinctTransferQueueFamilyIndex);
         ownershipDeviceDesc.deviceExtensions = deviceExtensions.data();
-        ownershipDeviceDesc.numDeviceExtensions = 1;
+        ownershipDeviceDesc.numDeviceExtensions = deviceExtensions.size();
         ownershipDeviceDesc.maintenance8Supported = true;
+        ownershipDeviceDesc.nullDescriptorSupported = true;
         nvrhi::vulkan::DeviceHandle ownershipDevice =
             nvrhi::vulkan::createDevice(ownershipDeviceDesc);
         passed &= bool(ownershipDevice);

@@ -22,6 +22,7 @@
 
 #include "vulkan-backend.h"
 #include <nvrhi/common/misc.h>
+#include <algorithm>
 #include <sstream>
 
 namespace nvrhi::vulkan
@@ -32,6 +33,26 @@ namespace nvrhi::vulkan
         BindingLayout* ret = new BindingLayout(m_Context, desc);
 
         ret->bake();
+
+        // f111-pig: a binding set keeps one volatileConstantBuffers entry, and a
+        // bind one dynamic offset, per dynamic uniform buffer element, array
+        // sizes counted, in arrays of c_MaxVolatileConstantBuffersPerLayout.
+        if (ret->dynamicBufferElements.size() > c_MaxVolatileConstantBuffersPerLayout)
+        {
+            std::stringstream ss;
+            ss << "Binding layout has " << ret->dynamicBufferElements.size()
+               << " volatile constant buffer elements (array sizes counted); the limit is "
+               << c_MaxVolatileConstantBuffersPerLayout;
+            m_Context.error(ss.str());
+            delete ret;
+            return nullptr;
+        }
+
+        // f111-pig: the longest run of null writes a set of this layout can need.
+        uint32_t longestBinding = 0;
+        for (const vk::DescriptorSetLayoutBinding& layoutBinding : ret->vulkanLayoutBindings)
+            longestBinding = std::max(longestBinding, layoutBinding.descriptorCount);
+        m_DescriptorSetAllocator.reserveNullDescriptors(longestBinding);
 
         return BindingLayoutHandle::Create(ret);
     }
@@ -286,11 +307,41 @@ namespace nvrhi::vulkan
             }
         }
 
+        // f111-pig: number the descriptors for createBindingSet's null fill,
+        // count them by type for the pools, and list the dynamic uniform buffer
+        // elements in dynamic offset order.
+        if (!isBindless)
+        {
+            pooledDescriptorCounts = DescriptorSetAllocator::countPerType(descriptorPoolSizeInfo);
+            bindingFirstDescriptor.reserve(vulkanLayoutBindings.size());
+            for (const vk::DescriptorSetLayoutBinding& layoutBinding : vulkanLayoutBindings)
+            {
+                bindingFirstDescriptor.push_back(numDescriptors);
+                numDescriptors += layoutBinding.descriptorCount;
+
+                if (layoutBinding.descriptorType == vk::DescriptorType::eUniformBufferDynamic)
+                {
+                    for (uint32_t element = 0; element < layoutBinding.descriptorCount; ++element)
+                        dynamicBufferElements.push_back({ layoutBinding.binding, element });
+                }
+            }
+            std::sort(dynamicBufferElements.begin(), dynamicBufferElements.end(),
+                [](const DynamicBufferElement& a, const DynamicBufferElement& b)
+                {
+                    return a.binding != b.binding ? a.binding < b.binding : a.arrayElement < b.arrayElement;
+                });
+        }
+
         return vk::Result::eSuccess;
     }
 
     BindingLayout::~BindingLayout()
     {
+        // No binding set refers to this layout any more, so nothing else can
+        // touch recycledDescriptorSets.
+        if (!recycledDescriptorSets.empty())
+            m_Context.descriptorSetAllocator->releaseRecycled(*this);
+
         if (descriptorSetLayout)
         {
             m_Context.device.destroyDescriptorSetLayout(descriptorSetLayout, m_Context.allocationCallbacks);
@@ -346,38 +397,506 @@ namespace nvrhi::vulkan
         return view && view->view;
     }
 
+    // f111-pig: DescriptorSetAllocator, the shared pools binding sets take
+    // their descriptor sets from.
+    //
+    // Driver cost, measured with VK_EXT_device_memory_report on an RTX 5090,
+    // driver 616.92 (2026-10-19):
+    //  - Creating a VkDescriptorPool takes no device memory, whatever its
+    //    maxSets or descriptor counts. The driver backs it as sets are
+    //    allocated from it, in 64 KiB chunks of whole sets, each set taking its
+    //    descriptor bytes rounded up to 128 (1-8 storage buffers took 128
+    //    bytes, 9-16 took 256, 17-24 took 384; the descriptor-buffer sizes the
+    //    driver reports, 4 B per image or sampler, 8 B per uniform buffer or
+    //    accel struct, 16 B per storage or texel buffer, match every set
+    //    measured, and dynamic uniform buffers take none).
+    //  - A pool keeps its chunks until it is destroyed. Freeing or resetting
+    //    sets returns none, and a FREE_DESCRIPTOR_SET pool with unused
+    //    capacity places a new set there rather than in a freed hole (free
+    //    every other set of 2,048 and allocate 1,024 more: +256 KiB).
+    //  - FREE_DESCRIPTOR_SET_BIT changes none of these numbers.
+    //  - Host memory is committed at creation: ~0.9 KiB per maxSets slot,
+    //    independent of the descriptor counts.
+    // So a pool per binding set costs a whole 64 KiB chunk for a set of a few
+    // hundred bytes at most.
+    //
+    // General pools, not a pool family per layout: a pool's floor is one
+    // chunk, so per-layout pools would cost at least 64 KiB for every layout
+    // with a live set, where general pools cost the sets' bytes plus one
+    // partly filled chunk per pool.
+    //
+    // Recycled per layout, not freed: the next binding set of a layout reuses
+    // a destroyed one's descriptor set, so churn makes no pool allocation or
+    // free and, since a freed hole is not refilled, grows no pool. Only a dying
+    // layout frees its kept sets into their pools, which is what the pools'
+    // FREE_DESCRIPTOR_SET_BIT is for. So a layout holds, for its whole life,
+    // as many sets as it ever had alive at once, at 128-384 bytes a set (a
+    // pool per set would cost 64 KiB a set). An application that retires its
+    // command lists between bursts of binding set creation bounds that to the
+    // sets in flight.
+    //
+    // Null fill: a reused set still holds its previous owner's descriptors and
+    // a fresh one holds undefined ones, so createBindingSet writes null into
+    // every descriptor the binding set does not, which a shader then reads as
+    // bound to nothing (nullDescriptor) instead of a destroyed view. The
+    // layout numbers its descriptors once (BindingLayout::bake), a bitset over
+    // that numbering marks what the binding set wrote, and each run of
+    // unwritten elements in a binding takes one write. A dynamic uniform
+    // buffer written null is bound at dynamic offset 0, so the offsets
+    // vkCmdBindDescriptorSets takes always match the layout's count.
+    //
+    // c_SetsPerPool, 512 set slots per pool. A pool's device memory is the
+    // bytes of every set allocated into it since its creation or last reset,
+    // with one partly filled chunk at the end, capped by its per-type
+    // capacity: the driver places new sets in unused capacity rather than in
+    // freed holes (allocate 400, free 200, allocate 200: about 600 sets'
+    // worth), and a pool that outlives a dying layout is not emptied, so it is
+    // not reset; a reset keeps the chunks for the sets that follow. Its host
+    // memory is ~0.9 KiB per slot from creation. While pools fill without
+    // frees, S live sets in pools of N slots carry at most 64 KiB x ceil(S / N)
+    // of partly filled chunks, plus the newest pool's unused slots, under
+    // 0.9 KiB x N of host memory; the sum is least near N = sqrt(64 S / 0.9),
+    // 8.4 sqrt(S): 285-326 for the 1,150-1,500 live sets measured in the
+    // engine (F-16 flight, dense_mixed). 512 is the power of two above,
+    // favouring device memory, the budgeted one.
+    //
+    // Per-type capacity of a pool, in each type: the larger of
+    // c_SetsPerPool x c_CapacityHeadroom x max(1, ceil(the average count of
+    // that type over the sets allocated so far, the requesting set included))
+    // and the requesting set's own count. So a pool takes 512 sets of up to
+    // twice the running average in every type; a set far above the average
+    // can use up a type sooner, and the counter check then skips that pool
+    // without asking the driver. A headroom of 2 absorbs the drift of later
+    // sets from the average; the floor of one per slot keeps a type no set
+    // has used yet from forcing a new pool when its first set arrives.
+    // Unused capacity costs nothing on the driver measured, in device or host
+    // memory. A driver that backs a pool when it is created pays, per pool,
+    // the sum over types of that capacity times the type's descriptor size;
+    // the floor alone is 2 x 512 x 76 B = 76 KiB at the descriptor sizes this
+    // driver reports.
+    static constexpr uint64_t c_CapacityHeadroom = 2;
+
+    // A null acceleration structure descriptor. Its count must equal the
+    // write's descriptorCount, so accel-struct runs are written one element
+    // at a time.
+    static const vk::AccelerationStructureKHR c_NullAccelStruct {};
+    static const vk::WriteDescriptorSetAccelerationStructureKHR c_NullAccelStructWrite =
+        vk::WriteDescriptorSetAccelerationStructureKHR()
+        .setAccelerationStructureCount(1)
+        .setPAccelerationStructures(&c_NullAccelStruct);
+
+    // Names an object through the pointer form, which returns its result
+    // instead of throwing; the name is a debugging hint, so the result is
+    // ignored. A null name clears it.
+    static void setDescriptorObjectName(const VulkanContext& context, vk::ObjectType type,
+        uint64_t handle, const char* name)
+    {
+        if (!context.extensions.EXT_debug_utils)
+            return;
+        const auto nameInfo = vk::DebugUtilsObjectNameInfoEXT()
+            .setObjectType(type)
+            .setObjectHandle(handle)
+            .setPObjectName(name);
+        (void)context.device.setDebugUtilsObjectNameEXT(&nameInfo);
+    }
+
+    vk::Result DescriptorSetAllocator::init()
+    {
+        // nullDescriptor covers images, buffers, texel buffers and accel
+        // structs; a sampler descriptor must name a sampler.
+        const auto samplerInfo = vk::SamplerCreateInfo();
+        const vk::Result res = m_Context.device.createSampler(&samplerInfo, m_Context.allocationCallbacks, &m_NullSampler);
+        if (res != vk::Result::eSuccess)
+            m_NullSampler = vk::Sampler();
+        return res;
+    }
+
+    void DescriptorSetAllocator::reserveNullDescriptors(uint32_t count)
+    {
+        std::lock_guard lockGuard(m_Mutex);
+        const NullDescriptorArrays* current = m_NullDescriptors.load(std::memory_order_relaxed);
+        const size_t currentCount = current ? current->images.size() : 0;
+        if (count <= currentCount)
+            return;
+
+        // At least doubling keeps every generation kept alive, together,
+        // under twice the newest.
+        const size_t newCount = std::max<size_t>(count, currentCount * 2);
+        auto arrays = std::make_unique<NullDescriptorArrays>();
+        arrays->images.assign(newCount, vk::DescriptorImageInfo().setImageLayout(vk::ImageLayout::eGeneral));
+        arrays->samplers.assign(newCount, vk::DescriptorImageInfo().setSampler(m_NullSampler));
+        arrays->buffers.assign(newCount, vk::DescriptorBufferInfo().setOffset(0).setRange(VK_WHOLE_SIZE));
+        arrays->bufferViews.assign(newCount, vk::BufferView());
+        m_NullDescriptors.store(arrays.get(), std::memory_order_release);
+        m_NullDescriptorGenerations.push_back(std::move(arrays));
+    }
+
+    DescriptorSetAllocator::~DescriptorSetAllocator()
+    {
+        for (const Pool& pool : m_Pools)
+            m_Context.device.destroyDescriptorPool(pool.pool, m_Context.allocationCallbacks);
+        if (m_NullSampler)
+            m_Context.device.destroySampler(m_NullSampler, m_Context.allocationCallbacks);
+    }
+
+    DescriptorSetAllocator::PerType DescriptorSetAllocator::countPerType(const std::vector<vk::DescriptorPoolSize>& poolSizes)
+    {
+        PerType counts {};
+        for (const vk::DescriptorPoolSize& size : poolSizes)
+        {
+            for (size_t typeIndex = 0; typeIndex < c_PooledDescriptorTypes.size(); ++typeIndex)
+            {
+                if (c_PooledDescriptorTypes[typeIndex] == size.type)
+                    counts[typeIndex] = size.descriptorCount;
+            }
+        }
+        return counts;
+    }
+
+    vk::Result DescriptorSetAllocator::openPool(const PerType& setCounts)
+    {
+        Pool pool;
+        static_vector<vk::DescriptorPoolSize, c_PooledDescriptorTypes.size()> poolSizes;
+        const uint64_t sets = m_AllocatedSets + 1;
+        for (size_t typeIndex = 0; typeIndex < c_PooledDescriptorTypes.size(); ++typeIndex)
+        {
+            const vk::DescriptorType type = c_PooledDescriptorTypes[typeIndex];
+            if (type == vk::DescriptorType::eAccelerationStructureKHR && !m_Context.extensions.KHR_acceleration_structure)
+                continue;
+
+            // The running average, the requesting set included, rounded up.
+            const uint64_t setCount = setCounts[typeIndex];
+            const uint64_t averagePerSet = (m_AllocatedDescriptors[typeIndex] + setCount + sets - 1) / sets;
+            const uint64_t capacity = std::max<uint64_t>(
+                c_SetsPerPool * c_CapacityHeadroom * std::max<uint64_t>(1, averagePerSet), setCount);
+            pool.capacity[typeIndex] = uint32_t(std::min<uint64_t>(capacity, std::numeric_limits<uint32_t>::max()));
+            poolSizes.push_back(vk::DescriptorPoolSize()
+                .setType(type)
+                .setDescriptorCount(pool.capacity[typeIndex]));
+        }
+
+        auto poolInfo = vk::DescriptorPoolCreateInfo()
+            .setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet)
+            .setMaxSets(c_SetsPerPool)
+            .setPoolSizeCount(uint32_t(poolSizes.size()))
+            .setPPoolSizes(poolSizes.data());
+
+        const vk::Result res = m_Context.device.createDescriptorPool(&poolInfo, m_Context.allocationCallbacks, &pool.pool);
+        if (res != vk::Result::eSuccess)
+            return res;
+
+        m_Pools.push_back(pool);
+        m_PoolsWithRoom.push_back(uint32_t(m_Pools.size() - 1));
+        setDescriptorObjectName(m_Context, vk::ObjectType::eDescriptorPool,
+            reinterpret_cast<uint64_t>(static_cast<VkDescriptorPool>(pool.pool)), "NVRHI binding set descriptor pool");
+        return res;
+    }
+
+    bool DescriptorSetAllocator::acquire(BindingLayout& layout, DescriptorSetAllocation& outAllocation)
+    {
+        const char* failure = nullptr;
+        vk::Result failureResult = vk::Result::eSuccess;
+        bool acquired = false;
+        {
+            std::lock_guard lockGuard(m_Mutex);
+            acquired = acquireLocked(layout, outAllocation, failure, failureResult);
+        }
+        // After the lock: the message callback is the application's and may
+        // take its own locks. Only a failed acquire reports: an empty pool
+        // that refused the set does not matter once an older pool took it.
+        //
+        // The driver calls under m_Mutex can run a validation layer's
+        // VkDebugUtilsMessenger synchronously: vkAllocateDescriptorSets here,
+        // vkCreateDescriptorPool and its naming call in openPool, and
+        // vkFreeDescriptorSets and vkResetDescriptorPool in releaseRecycled,
+        // on binding layout destruction. So the application's messenger must
+        // not take any lock that is held while binding sets or binding
+        // layouts are created or destroyed.
+        if (!acquired && failure)
+            m_Context.error(std::string(failure) + ", VkResult = " + resultToString(VkResult(failureResult)));
+        return acquired;
+    }
+
+    bool DescriptorSetAllocator::acquireLocked(BindingLayout& layout, DescriptorSetAllocation& outAllocation,
+        const char*& failure, vk::Result& failureResult)
+    {
+        if (!layout.recycledDescriptorSets.empty())
+        {
+            outAllocation = layout.recycledDescriptorSets.back();
+            layout.recycledDescriptorSets.pop_back();
+            return true;
+        }
+
+        auto allocInfo = vk::DescriptorSetAllocateInfo()
+            .setDescriptorSetCount(1)
+            .setPSetLayouts(&layout.descriptorSetLayout);
+        const PerType& setCounts = layout.pooledDescriptorCounts;
+
+        // Counter room in every type, and smaller than any set the driver
+        // refused from this pool despite counter room.
+        auto hasRoom = [&](const Pool& pool)
+        {
+            if (layout.numDescriptors >= pool.refusedSetDescriptors)
+                return false;
+            for (size_t typeIndex = 0; typeIndex < c_PooledDescriptorTypes.size(); ++typeIndex)
+            {
+                if (setCounts[typeIndex] > pool.capacity[typeIndex] - pool.used[typeIndex])
+                    return false;
+            }
+            return true;
+        };
+
+        // vk::Result::eSuccess fills outAllocation; a pool that reaches maxSets
+        // leaves m_PoolsWithRoom (at listIndex) until a set is freed into it.
+        auto allocateFrom = [&](size_t listIndex) -> vk::Result
+        {
+            const uint32_t poolIndex = m_PoolsWithRoom[listIndex];
+            Pool& pool = m_Pools[poolIndex];
+            allocInfo.setDescriptorPool(pool.pool);
+            vk::DescriptorSet set;
+            const vk::Result res = m_Context.device.allocateDescriptorSets(&allocInfo, &set);
+            if (res != vk::Result::eSuccess)
+                return res;
+
+            for (size_t typeIndex = 0; typeIndex < c_PooledDescriptorTypes.size(); ++typeIndex)
+            {
+                pool.used[typeIndex] += setCounts[typeIndex];
+                m_AllocatedDescriptors[typeIndex] += setCounts[typeIndex];
+            }
+            ++m_AllocatedSets;
+            ++pool.allocatedSets;
+            if (!pool.listed())
+                m_PoolsWithRoom.erase(m_PoolsWithRoom.begin() + ptrdiff_t(listIndex));
+            outAllocation.set = set;
+            outAllocation.poolIndex = poolIndex;
+            return res;
+        };
+
+        // Newest first, skipping pools that show no room for the set.
+        bool emptyPoolRefused = false;
+        for (size_t listIndex = m_PoolsWithRoom.size(); listIndex-- > 0;)
+        {
+            Pool& pool = m_Pools[m_PoolsWithRoom[listIndex]];
+            if (!hasRoom(pool))
+                continue;
+
+            const vk::Result res = allocateFrom(listIndex);
+            if (res == vk::Result::eSuccess)
+                return true;
+            if (res != vk::Result::eErrorOutOfPoolMemory && res != vk::Result::eErrorFragmentedPool)
+            {
+                failure = "vkAllocateDescriptorSets failed for a binding set";
+                failureResult = res;
+                return false;
+            }
+
+            if (pool.allocatedSets == 0)
+            {
+                // Vulkan guarantees a pool with no frees since its creation or
+                // last reset does not fail an allocation for fragmentation, and
+                // releaseRecycled resets a pool its frees empty, so every empty
+                // pool has that guarantee. One refusing a set its sizes fit
+                // means a new pool would refuse it too.
+                failure = "An empty descriptor pool refused a binding set that fits its sizes";
+                failureResult = res;
+                emptyPoolRefused = true;
+                continue;
+            }
+
+            // Fragmentation: sets at least this large skip the pool until a
+            // set is freed into it; smaller ones may still fit.
+            pool.refusedSetDescriptors = std::min(pool.refusedSetDescriptors, layout.numDescriptors);
+        }
+
+        // Opening a pool per retry of a set no pool takes would grow without bound.
+        if (emptyPoolRefused)
+            return false;
+
+        const vk::Result openResult = openPool(setCounts);
+        if (openResult != vk::Result::eSuccess)
+        {
+            failure = "vkCreateDescriptorPool failed for binding sets";
+            failureResult = openResult;
+            return false;
+        }
+
+        // The new pool holds the set by construction. On failure it stays
+        // listed: it is empty and usable by other sets.
+        const vk::Result res = allocateFrom(m_PoolsWithRoom.size() - 1);
+        if (res == vk::Result::eSuccess)
+            return true;
+        failure = "A new descriptor pool refused the binding set it was sized for";
+        failureResult = res;
+        return false;
+    }
+
+    void DescriptorSetAllocator::appendNullWrites(const BindingLayout& layout, vk::DescriptorSet set,
+        std::vector<vk::WriteDescriptorSet>& writes) const
+    {
+        const size_t numBindings = layout.vulkanLayoutBindings.size();
+        if (layout.numDescriptors == 0)
+            return;
+
+        // One bit per layout descriptor, set where `writes` writes it. Each
+        // thread keeps its scratch's capacity, so steady state allocates nothing.
+        static thread_local std::vector<uint64_t> written;
+        written.assign((layout.numDescriptors + 63) / 64, 0);
+        uint32_t writtenCount = 0;
+
+        // Writes mostly follow the layout's binding order, so each search
+        // starts at the binding the previous write matched.
+        size_t bindingIndex = 0;
+        for (const vk::WriteDescriptorSet& write : writes)
+        {
+            size_t probe = 0;
+            while (probe < numBindings && layout.vulkanLayoutBindings[bindingIndex].binding != write.dstBinding)
+            {
+                bindingIndex = (bindingIndex + 1) % numBindings;
+                ++probe;
+            }
+            if (probe == numBindings)
+                continue;
+
+            const uint32_t elementCount = layout.vulkanLayoutBindings[bindingIndex].descriptorCount;
+            const uint32_t elementEnd = std::min(write.dstArrayElement + write.descriptorCount, elementCount);
+            for (uint32_t element = write.dstArrayElement; element < elementEnd; ++element)
+            {
+                const uint32_t descriptor = layout.bindingFirstDescriptor[bindingIndex] + element;
+                const uint64_t bit = uint64_t(1) << (descriptor % 64);
+                if ((written[descriptor / 64] & bit) == 0)
+                {
+                    written[descriptor / 64] |= bit;
+                    ++writtenCount;
+                }
+            }
+        }
+
+        if (writtenCount == layout.numDescriptors)
+            return;
+
+        // createBindingLayout grew these to the layout's longest binding.
+        const NullDescriptorArrays* nulls = m_NullDescriptors.load(std::memory_order_acquire);
+        assert(nulls);
+
+        auto isWritten = [&](uint32_t descriptor)
+        {
+            return (written[descriptor / 64] & (uint64_t(1) << (descriptor % 64))) != 0;
+        };
+
+        writes.reserve(writes.size() + (layout.numDescriptors - writtenCount));
+        for (size_t i = 0; i < numBindings; ++i)
+        {
+            const vk::DescriptorSetLayoutBinding& layoutBinding = layout.vulkanLayoutBindings[i];
+            const uint32_t firstDescriptor = layout.bindingFirstDescriptor[i];
+            uint32_t element = 0;
+            while (element < layoutBinding.descriptorCount)
+            {
+                if (isWritten(firstDescriptor + element))
+                {
+                    ++element;
+                    continue;
+                }
+
+                const uint32_t runStart = element;
+                while (element < layoutBinding.descriptorCount && !isWritten(firstDescriptor + element))
+                    ++element;
+                const uint32_t runLength = element - runStart;
+                assert(runLength <= nulls->images.size());
+
+                auto write = vk::WriteDescriptorSet()
+                    .setDstSet(set)
+                    .setDstBinding(layoutBinding.binding)
+                    .setDstArrayElement(runStart)
+                    .setDescriptorCount(runLength)
+                    .setDescriptorType(layoutBinding.descriptorType);
+
+                switch (layoutBinding.descriptorType)
+                {
+                case vk::DescriptorType::eSampler:
+                    write.setPImageInfo(nulls->samplers.data());
+                    break;
+                case vk::DescriptorType::eSampledImage:
+                case vk::DescriptorType::eStorageImage:
+                    write.setPImageInfo(nulls->images.data());
+                    break;
+                case vk::DescriptorType::eUniformTexelBuffer:
+                case vk::DescriptorType::eStorageTexelBuffer:
+                    write.setPTexelBufferView(nulls->bufferViews.data());
+                    break;
+                case vk::DescriptorType::eUniformBuffer:
+                case vk::DescriptorType::eUniformBufferDynamic:
+                case vk::DescriptorType::eStorageBuffer:
+                    write.setPBufferInfo(nulls->buffers.data());
+                    break;
+                case vk::DescriptorType::eAccelerationStructureKHR:
+                    write.setDescriptorCount(1).setPNext(&c_NullAccelStructWrite);
+                    for (uint32_t runElement = runStart; runElement < element; ++runElement)
+                        writes.push_back(vk::WriteDescriptorSet(write).setDstArrayElement(runElement));
+                    continue;
+                default:
+                    // convertResourceType produces no other type for a regular layout.
+                    utils::InvalidEnum();
+                    continue;
+                }
+
+                writes.push_back(write);
+            }
+        }
+    }
+
+    void DescriptorSetAllocator::recycle(BindingLayout& layout, const DescriptorSetAllocation& allocation)
+    {
+        std::lock_guard lockGuard(m_Mutex);
+        layout.recycledDescriptorSets.push_back(allocation);
+    }
+
+    void DescriptorSetAllocator::releaseRecycled(BindingLayout& layout)
+    {
+        std::lock_guard lockGuard(m_Mutex);
+        const PerType& setCounts = layout.pooledDescriptorCounts;
+        for (const DescriptorSetAllocation& allocation : layout.recycledDescriptorSets)
+        {
+            Pool& pool = m_Pools[allocation.poolIndex];
+            (void)m_Context.device.freeDescriptorSets(pool.pool, 1, &allocation.set);
+            const bool wasListed = pool.listed();
+            for (size_t typeIndex = 0; typeIndex < c_PooledDescriptorTypes.size(); ++typeIndex)
+                pool.used[typeIndex] -= setCounts[typeIndex];
+            --pool.allocatedSets;
+            // The free makes room and may join the fragments.
+            pool.refusedSetDescriptors = UINT32_MAX;
+            if (pool.allocatedSets == 0)
+            {
+                // A pool with frees since its creation or last reset may fail
+                // an allocation for fragmentation even when empty; a reset
+                // restores Vulkan's guarantee that it does not, which is what
+                // acquire's empty-pool rule relies on. The C entry point:
+                // vkResetDescriptorPool cannot fail, and the vulkan-hpp
+                // wrapper would throw on a failure, here under a lock and on a
+                // layout's destruction path.
+                VULKAN_HPP_DEFAULT_DISPATCHER.vkResetDescriptorPool(
+                    VkDevice(m_Context.device), VkDescriptorPool(pool.pool), 0);
+                // Every free took its set's descriptors off the counters.
+                assert(std::all_of(pool.used.begin(), pool.used.end(), [](uint32_t used) { return used == 0; }));
+            }
+            if (!wasListed)
+                m_PoolsWithRoom.push_back(allocation.poolIndex);
+        }
+        layout.recycledDescriptorSets.clear();
+    }
+
     BindingSetHandle Device::createBindingSet(const BindingSetDesc& desc, IBindingLayout* _layout)
     {
         BindingLayout* layout = checked_cast<BindingLayout*>(_layout);
 
+        DescriptorSetAllocation allocation;
+        if (!m_DescriptorSetAllocator.acquire(*layout, allocation))
+            return nullptr;
+
         BindingSet *ret = new BindingSet(m_Context);
         ret->desc = desc;
         ret->layout = layout;
+        ret->descriptorSetAllocation = allocation;
 
-        const auto& descriptorSetLayout = layout->descriptorSetLayout;
-        const auto& poolSizes = layout->descriptorPoolSizeInfo;
-
-        // create descriptor pool to allocate a descriptor from
-        auto poolInfo = vk::DescriptorPoolCreateInfo()
-            .setPoolSizeCount(uint32_t(poolSizes.size()))
-            .setPPoolSizes(poolSizes.data())
-            .setMaxSets(1);
-
-        vk::Result res = m_Context.device.createDescriptorPool(&poolInfo,
-                                                             m_Context.allocationCallbacks,
-                                                             &ret->descriptorPool);
-        CHECK_VK_FAIL(res)
-        
-        // create the descriptor set
-        auto descriptorSetAllocInfo = vk::DescriptorSetAllocateInfo()
-            .setDescriptorPool(ret->descriptorPool)
-            .setDescriptorSetCount(1)
-            .setPSetLayouts(&descriptorSetLayout);
-
-        res = m_Context.device.allocateDescriptorSets(&descriptorSetAllocInfo,
-            &ret->descriptorSet);
-        CHECK_VK_FAIL(res)
-        
         // collect all of the descriptor write data
         std::vector<vk::DescriptorImageInfo> descriptorImageInfo;
         std::vector<vk::DescriptorBufferInfo> descriptorBufferInfo;
@@ -387,6 +906,16 @@ namespace nvrhi::vulkan
         descriptorBufferInfo.reserve(desc.bindings.size());
         descriptorWriteInfo.reserve(desc.bindings.size());
         accelStructWriteInfo.reserve(desc.bindings.size());
+
+        // f111-pig: volatile constant buffers as written; volatileConstantBuffers
+        // takes them in the layout's dynamic offset order once all are known.
+        struct VolatileBufferWrite
+        {
+            uint32_t binding;
+            uint32_t arrayElement;
+            Buffer* buffer;
+        };
+        static_vector<VolatileBufferWrite, c_MaxVolatileConstantBuffersPerLayout> volatileBufferWrites;
 
         auto generateWriteDescriptorData =
             // generates a vk::WriteDescriptorSet struct in descriptorWriteInfo
@@ -400,7 +929,7 @@ namespace nvrhi::vulkan
         {
             descriptorWriteInfo.push_back(
                 vk::WriteDescriptorSet()
-                .setDstSet(ret->descriptorSet)
+                .setDstSet(allocation.set)
                 .setDstBinding(bindingLocation)
                 .setDstArrayElement(arrayElement)
                 .setDescriptorCount(1)
@@ -544,7 +1073,7 @@ namespace nvrhi::vulkan
                         .setRange(range.byteSize)
                         .setFormat(vk::Format(vkformat));
 
-                    res = m_Context.device.createBufferView(&bufferViewInfo, m_Context.allocationCallbacks, &bufferViewRef);
+                    const vk::Result res = m_Context.device.createBufferView(&bufferViewInfo, m_Context.allocationCallbacks, &bufferViewRef);
                     ASSERT_VK_OK(res);
                 }
 
@@ -594,10 +1123,15 @@ namespace nvrhi::vulkan
                     descriptorType,
                     nullptr, &bufferInfo, nullptr);
 
-                if (binding.type == ResourceType::VolatileConstantBuffer) 
+                if (binding.type == ResourceType::VolatileConstantBuffer)
                 {
                     assert(buffer->desc.isVolatile);
-                    ret->volatileConstantBuffers.push_back(buffer);
+                    // The layout holds at most this many dynamic elements
+                    // (createBindingLayout), so a desc writing more is invalid.
+                    if (volatileBufferWrites.size() < volatileBufferWrites.max_size())
+                        volatileBufferWrites.push_back({ registerOffset + binding.slot, binding.arrayElement, buffer });
+                    else
+                        m_Context.error("Binding set writes more volatile constant buffers than its layout holds");
                 }
                 else
                 {
@@ -690,6 +1224,21 @@ namespace nvrhi::vulkan
 
         }
 
+        // One entry per layout dynamic uniform buffer element, in dynamic offset
+        // order: an element the binding set left unset is written null below
+        // and bound at offset 0 (bindBindingSets).
+        for (const BindingLayout::DynamicBufferElement& element : layout->dynamicBufferElements)
+        {
+            Buffer* buffer = nullptr;
+            for (const VolatileBufferWrite& write : volatileBufferWrites)
+            {
+                if (write.binding == element.binding && write.arrayElement == element.arrayElement)
+                    buffer = write.buffer;
+            }
+            ret->volatileConstantBuffers.push_back(buffer);
+        }
+
+        m_DescriptorSetAllocator.appendNullWrites(*layout, allocation.set, descriptorWriteInfo);
         m_Context.device.updateDescriptorSets(uint32_t(descriptorWriteInfo.size()), descriptorWriteInfo.data(), 0, nullptr);
 
         return BindingSetHandle::Create(ret);
@@ -697,11 +1246,24 @@ namespace nvrhi::vulkan
 
     BindingSet::~BindingSet()
     {
-        if (descriptorPool)
+        // A binding set recorded with trackLiveness dies only once the command
+        // lists holding it retire (their submissions' semaphore values have
+        // completed), so no GPU work still reads the set when its next owner
+        // rewrites it. One created with trackLiveness = false relies on the
+        // application keeping it alive until that work finishes, as
+        // destroying a descriptor pool would.
+        if (descriptorSetAllocation.set)
         {
-            m_Context.device.destroyDescriptorPool(descriptorPool, m_Context.allocationCallbacks);
-            descriptorPool = vk::DescriptorPool();
-            descriptorSet = vk::DescriptorSet();
+            // The next owner may never name the set; without this, validation
+            // messages and captures would show this binding set's name. One
+            // call measured 0.017 us without layers (RTX 5090, driver 616.92),
+            // so the ~8 binding sets the engine churns a frame cost ~0.14 us.
+            // It does not throw, which a destructor must not.
+            setDescriptorObjectName(m_Context, vk::ObjectType::eDescriptorSet,
+                reinterpret_cast<uint64_t>(static_cast<VkDescriptorSet>(descriptorSetAllocation.set)), nullptr);
+
+            m_Context.descriptorSetAllocator->recycle(*checked_cast<BindingLayout*>(layout.Get()), descriptorSetAllocation);
+            descriptorSetAllocation = DescriptorSetAllocation();
         }
     }
 
@@ -709,10 +1271,10 @@ namespace nvrhi::vulkan
     {
         switch (objectType)
         {
-        case ObjectTypes::VK_DescriptorPool:
-            return Object(descriptorPool);
+        // VK_DescriptorPool: a binding set owns no pool; its set comes from a
+        // pool shared by many binding sets.
         case ObjectTypes::VK_DescriptorSet:
-            return Object(descriptorSet);
+            return Object(descriptorSetAllocation.set);
         default:
             return nullptr;
         }
@@ -1016,7 +1578,10 @@ namespace nvrhi::vulkan
 
         BindingVector<vk::DescriptorSet> descriptorSets;
         uint32_t nextDescriptorSetToBind = 0;
-        static_vector<uint32_t, c_MaxVolatileConstantBuffers> dynamicOffsets;
+        // f111-pig: up to c_MaxBindingLayouts sets, each with at most
+        // c_MaxVolatileConstantBuffersPerLayout dynamic elements
+        // (createBindingLayout), so the offsets of any bind fit.
+        static_vector<uint32_t, c_MaxBindingLayouts * c_MaxVolatileConstantBuffersPerLayout> dynamicOffsets;
         for (uint32_t i = 0; i < numDescriptorSets; ++i)
         {
             IBindingSet* bindingSetHandle = nullptr;
@@ -1049,10 +1614,18 @@ namespace nvrhi::vulkan
                 if (desc)
                 {
                     BindingSet* bindingSet = checked_cast<BindingSet*>(bindingSetHandle);
-                    descriptorSets.push_back(bindingSet->descriptorSet);
+                    descriptorSets.push_back(bindingSet->descriptorSetAllocation.set);
 
                     for (Buffer* constantBuffer : bindingSet->volatileConstantBuffers)
                     {
+                        // f111-pig: an element the binding set left unset is a
+                        // null descriptor; its offset only keeps the count.
+                        if (!constantBuffer)
+                        {
+                            dynamicOffsets.push_back(0);
+                            continue;
+                        }
+
                         auto found = m_VolatileBufferStates.find(constantBuffer);
                         if (found == m_VolatileBufferStates.end())
                         {

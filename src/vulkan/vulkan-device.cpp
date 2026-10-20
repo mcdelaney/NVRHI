@@ -35,6 +35,19 @@ namespace nvrhi::vulkan
 {
     DeviceHandle createDevice(const DeviceDesc& desc)
     {
+        // f111-pig: an explicit flag rather than the extension name: the name
+        // in deviceExtensions does not prove the application enabled the
+        // feature bit on the VkDevice it created (as for maintenance8).
+        if (!desc.nullDescriptorSupported)
+        {
+            if (desc.errorCB)
+                desc.errorCB->message(MessageSeverity::Error,
+                    "nvrhi::vulkan::createDevice: DeviceDesc::nullDescriptorSupported is false. "
+                    "Enable VK_KHR_robustness2 or VK_EXT_robustness2 with the nullDescriptor feature: "
+                    "binding sets write null into every descriptor they leave unset.");
+            return nullptr;
+        }
+
 #if defined(NVRHI_SHARED_LIBRARY_BUILD)
 #if VK_HEADER_VERSION >= 301
         vk::detail::DynamicLoader dl(desc.vulkanLibraryName);
@@ -47,16 +60,29 @@ namespace nvrhi::vulkan
 #endif
 
         Device* device = new Device(desc);
-        return DeviceHandle::Create(device);
+        DeviceHandle handle = DeviceHandle::Create(device);
+        const vk::Result initResult = device->initDescriptorSetAllocator();
+        if (initResult != vk::Result::eSuccess)
+        {
+            if (desc.errorCB)
+                desc.errorCB->message(MessageSeverity::Error, (std::string(
+                    "nvrhi::vulkan::createDevice: vkCreateSampler failed for the default sampler "
+                    "binding sets write where they leave a sampler unset, VkResult = ")
+                    + resultToString(VkResult(initResult))).c_str());
+            return nullptr;
+        }
+        return handle;
     }
         
     Device::Device(const DeviceDesc& desc)
         : m_AccelStructStorageSharedAcrossQueues(desc.accelStructStorageSharedAcrossQueues)
         , m_Context(desc.instance, desc.physicalDevice, desc.device, reinterpret_cast<vk::AllocationCallbacks*>(desc.allocationCallbacks))
         , m_Allocator(m_Context)
+        , m_DescriptorSetAllocator(m_Context)
         , m_TimerQueryAllocator(desc.maxTimerQueries, true)
     {
         m_Context.pipelineCompileOffload = &m_PipelineCompileOffload;
+        m_Context.descriptorSetAllocator = &m_DescriptorSetAllocator;
 
         // NVRHI exposes logical Graphics/Compute/Copy queues, but applications
         // are allowed to bind more than one of those labels to the same Vulkan

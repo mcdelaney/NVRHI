@@ -556,6 +556,13 @@ namespace nvrhi::vulkan
         // when the externally-owned VkDevice was created. The extension name
         // must also be present in deviceExtensions.
         bool maintenance8Supported = false;
+        // f111-pig: Indicates that VK_KHR_robustness2 or VK_EXT_robustness2 is
+        // enabled and VkPhysicalDeviceRobustness2FeaturesKHR::nullDescriptor was
+        // set to true when the externally-owned VkDevice was created. Required:
+        // a binding set's descriptor set is reused from a destroyed one, and
+        // every descriptor the binding set leaves unset is written null.
+        // createDevice fails without it.
+        bool nullDescriptorSupported = false;
         // Creates acceleration-structure storage buffers with
         // VK_SHARING_MODE_CONCURRENT across every distinct queue family supplied
         // above. This is an immutable device-creation policy: it covers native
