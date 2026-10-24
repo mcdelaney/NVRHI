@@ -166,6 +166,32 @@ namespace nvrhi::vulkan
         // retirement that drains the count.
         std::unordered_map<uint64_t, uint32_t> compactionInFlight;
         std::vector<uint64_t> pendingRemovals;
+        // RTXMU frees an allocation the moment it is told to: its suballocator
+        // hands the range to the next allocation and destroys a block it
+        // empties. The calls that tell it prove less than that needs. A
+        // compaction list's retirement proves only that list finished, and an
+        // AccelStruct's last reference only that the lists which recorded its
+        // builds finished, not that every TLAS build or trace that baked its
+        // address did. So every RTXMU release (RemoveAccelerationStructures,
+        // and GarbageCollection's post-compaction frees) queues here in order,
+        // and Device::runGarbageCollection seals the unsealed ones with each
+        // queue's last submitted ID and hands them to RTXMU once every queue
+        // has completed those. Order matters for one id: a compaction's
+        // GarbageCollection precedes the structure's removal.
+        struct DeferredRelease
+        {
+            uint64_t id = 0;
+            bool remove = false;   // RemoveAccelerationStructures; else GarbageCollection
+            bool sealed = false;
+            std::array<uint64_t, size_t(CommandQueue::Count)> after {};
+        };
+        std::vector<DeferredRelease> deferredReleases;
+        // The ids of a run of same-kind releases, handed to RTXMU in one call.
+        std::vector<uint64_t> releaseBatch;
+        void deferRelease(uint64_t id, bool remove)
+        {
+            deferredReleases.push_back(DeferredRelease{ id, remove });
+        }
         std::mutex asListMutex;
     };
 #endif
@@ -1705,6 +1731,13 @@ namespace nvrhi::vulkan
             const GraphResourceStateTransition& transition) override;
 
     private:
+#ifdef NVRHI_WITH_RTXMU
+        // Hands RTXMU the deferred releases every queue has completed (all:
+        // every one, for a device being destroyed) and seals the rest
+        // (RtxMuResources::DeferredRelease).
+        void retireRtxmuReleases(bool all);
+#endif
+
         // Warning m_AftermathCrashDump helper must be first due to reverse destruction order
         // Queues will destroy CommandLists which will unregister from m_AftermathCrashDumpHelper in their destructors
         bool m_AftermathEnabled = false;

@@ -362,6 +362,13 @@ namespace nvrhi::vulkan
 
     Device::~Device()
     {
+#ifdef NVRHI_WITH_RTXMU
+        // Destroying a device requires its queues idle: every release still
+        // queued goes to RTXMU now, so its structures are destroyed before the
+        // device rather than outliving it.
+        retireRtxmuReleases(true);
+#endif
+
         if (m_TimerQueryPool)
         {
             m_Context.device.destroyQueryPool(m_TimerQueryPool);
@@ -511,7 +518,86 @@ namespace nvrhi::vulkan
                 queue->defaultLifetimeTracker->runGarbageCollection();
             }
         }
+
+#ifdef NVRHI_WITH_RTXMU
+        // After the trackers: the releases their retirements queued are sealed
+        // against every submission so far.
+        retireRtxmuReleases(false);
+#endif
     }
+
+#ifdef NVRHI_WITH_RTXMU
+    void Device::retireRtxmuReleases(const bool all)
+    {
+        RtxMuResources* const rtxmu = m_Context.rtxMuResources.get();
+        if (!rtxmu)
+            return;
+        {
+            std::lock_guard lock(rtxmu->asListMutex);
+            if (rtxmu->deferredReleases.empty())
+                return;
+        }
+
+        // Each queue's completed ID, polled before the list lock: a value read
+        // early is only lower, which delays a release and never hastens one.
+        // Polled rather than cached so a queue without a default tracker
+        // still advances. A device being destroyed is idle and not polled.
+        constexpr size_t queueCount = size_t(CommandQueue::Count);
+        std::array<uint64_t, queueCount> finished {};
+        if (!all)
+            for (size_t q = 0; q < queueCount; ++q)
+                if (Queue* queue = m_Queues[q].get())
+                    finished[q] = queue->updateLastFinishedID();
+
+        std::lock_guard lock(rtxmu->asListMutex);
+        auto& releases = rtxmu->deferredReleases;
+
+        size_t ready = 0;
+        for (; ready < releases.size(); ++ready)
+        {
+            const RtxMuResources::DeferredRelease& release = releases[ready];
+            if (all)
+                continue;
+            if (!release.sealed)
+                break;
+            bool complete = true;
+            for (size_t q = 0; q < queueCount; ++q)
+                complete = complete && finished[q] >= release.after[q];
+            if (!complete)
+                break;
+        }
+
+        // In order, one RTXMU call per run of same-kind releases.
+        for (size_t begin = 0; begin < ready;)
+        {
+            const bool remove = releases[begin].remove;
+            rtxmu->releaseBatch.clear();
+            size_t end = begin;
+            for (; end < ready && releases[end].remove == remove; ++end)
+                rtxmu->releaseBatch.push_back(releases[end].id);
+            if (remove)
+                m_Context.rtxMemUtil->RemoveAccelerationStructures(rtxmu->releaseBatch);
+            else
+                m_Context.rtxMemUtil->GarbageCollection(rtxmu->releaseBatch);
+            begin = end;
+        }
+        releases.erase(releases.begin(), releases.begin() + static_cast<std::ptrdiff_t>(ready));
+
+        // Seal what was queued since the last call against every submission
+        // so far. Every submission that can read a release's memory precedes
+        // its queueing, which precedes this read under the lock. Unsealed
+        // releases are always the tail.
+        std::array<uint64_t, queueCount> submitted {};
+        for (size_t q = 0; q < queueCount; ++q)
+            if (Queue* queue = m_Queues[q].get())
+                submitted[q] = queue->getLastSubmittedID();
+        for (auto it = releases.rbegin(); it != releases.rend() && !it->sealed; ++it)
+        {
+            it->after = submitted;
+            it->sealed = true;
+        }
+    }
+#endif
 
     // CommandListLifetimeTracker — Vulkan implementation that mirrors the
     // D3D12 backend's per-tracker in-flight list (PR #119). Each tracker
@@ -600,23 +686,25 @@ namespace nvrhi::vulkan
                     if (!cb->rtxmuCompactionIds.empty())
                     {
                         // This list's copies have landed, so these ids leave
-                        // flight. Drop their counts before GarbageCollection
-                        // so a structure destroyed since can be removed here.
+                        // flight. Drop their counts before queueing their
+                        // GarbageCollection so a structure destroyed since
+                        // queues its removal behind it here. The pre-compaction
+                        // memory it frees is released once every queue has
+                        // passed this point (RtxMuResources::DeferredRelease).
                         for (const uint64_t id : cb->rtxmuCompactionIds)
                         {
                             const auto it = m_Context.rtxMuResources->compactionInFlight.find(id);
-                            if (it == m_Context.rtxMuResources->compactionInFlight.end())
-                                continue;
-                            if (--it->second == 0)
+                            if (it != m_Context.rtxMuResources->compactionInFlight.end() && --it->second == 0)
                                 m_Context.rtxMuResources->compactionInFlight.erase(it);
+                            m_Context.rtxMuResources->deferRelease(id, false);
                         }
-                        m_Context.rtxMemUtil->GarbageCollection(cb->rtxmuCompactionIds);
                         cb->rtxmuCompactionIds.clear();
                     }
 
                     // Structures whose owner died while their compaction was
                     // in flight: their removal was deferred to whichever
-                    // retirement drains the last count. Unconditional so an
+                    // retirement drains the last count, and queues behind
+                    // that compaction's GarbageCollection. Unconditional so an
                     // entry can never strand behind a list that carried no
                     // compaction ids.
                     auto& pending = m_Context.rtxMuResources->pendingRemovals;
@@ -627,8 +715,7 @@ namespace nvrhi::vulkan
                             ++i;
                             continue;
                         }
-                        const std::vector<uint64_t> toRemove = { pending[i] };
-                        m_Context.rtxMemUtil->RemoveAccelerationStructures(toRemove);
+                        m_Context.rtxMuResources->deferRelease(pending[i], true);
                         pending[i] = pending.back();
                         pending.pop_back();
                     }

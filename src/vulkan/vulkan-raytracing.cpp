@@ -1358,15 +1358,14 @@ namespace nvrhi::vulkan
             // retirement that drains the count. RTXMU owns every allocation
             // behind the id until then, so nothing leaks and nothing is
             // freed early — this object no longer names it either way.
+            // Otherwise the removal queues now, and RTXMU frees the memory
+            // and recycles the id once every queue has completed the work
+            // submitted so far: a TLAS build or trace that baked this
+            // structure's address holds no reference to this object.
             if (m_Context.rtxMuResources->compactionInFlight.count(rtxmuId))
-            {
                 m_Context.rtxMuResources->pendingRemovals.push_back(rtxmuId);
-            }
             else
-            {
-                std::vector<uint64_t> delAccel = { rtxmuId };
-                m_Context.rtxMemUtil->RemoveAccelerationStructures(delAccel);
-            }
+                m_Context.rtxMuResources->deferRelease(rtxmuId, true);
             rtxmuId = ~0ull;
         }
 #else
